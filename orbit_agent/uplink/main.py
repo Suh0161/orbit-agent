@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from dotenv import load_dotenv
 
-from orbit_agent.config.config import load_config
+from orbit_agent.config.config import OrbitConfig
 from orbit_agent.uplink.telegram_bot import OrbitTelegramBot, UplinkConfig, TELEGRAM_AVAILABLE
 
 
@@ -55,7 +55,7 @@ def main():
     
     # Load Orbit config
     try:
-        config = load_config()
+        config = OrbitConfig.load()
     except Exception as e:
         print(f"❌ Failed to load config: {e}")
         sys.exit(1)

@@ -39,7 +39,7 @@ except ImportError:
     TELEGRAM_AVAILABLE = False
     print("[Uplink] python-telegram-bot not installed. Run: pip install python-telegram-bot")
 
-from orbit_agent.config.config import OrbitConfig, load_config
+from orbit_agent.config.config import OrbitConfig
 from orbit_agent.core.agent import Agent
 
 # Configure logging
