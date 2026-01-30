@@ -1,5 +1,6 @@
 import asyncio
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Tuple
 from uuid import UUID
 
 from orbit_agent.config.config import OrbitConfig
@@ -224,24 +225,71 @@ CRITICAL INSTRUCTION:
             
             await asyncio.sleep(0.5)
 
-    async def _handle_step_failure(self, task: Task, step: TaskStep, error: str):
+    async def _handle_step_failure(self, task: Task, step: TaskStep, error: str, retry_count: int = 0):
         """
-        Attempts to self-heal by asking the Planner for a fix.
-        """
-        print(f"Step {step.id} failed with: {error}")
-        print("Initiating SELF-HEALING protocol...")
+        Enhanced self-correction loop.
         
-        # 1. Gather History
+        Strategy:
+        1. For transient errors: retry up to 2 times
+        2. For code edits: run verification command
+        3. For persistent errors: replan with detailed context
+        """
+        MAX_RETRIES = 2
+        
+        print(f"Step {step.id} failed with: {error}")
+        
+        # Check if this is a transient/retryable error
+        transient_patterns = [
+            "timeout", "connection", "network", "rate limit", 
+            "temporarily unavailable", "retry", "ECONNRESET"
+        ]
+        is_transient = any(pattern.lower() in error.lower() for pattern in transient_patterns)
+        
+        if is_transient and retry_count < MAX_RETRIES:
+            print(f"Transient error detected. Retrying ({retry_count + 1}/{MAX_RETRIES})...")
+            await asyncio.sleep(2 ** retry_count)  # Exponential backoff
+            
+            try:
+                skill = self.skills.get_skill(step.skill_name)
+                input_model = skill.input_schema(**step.skill_config)
+                output = await skill.execute(input_model)
+                
+                if getattr(output, "error", None):
+                    # Still failing, try again or escalate
+                    await self._handle_step_failure(task, step, output.error, retry_count + 1)
+                else:
+                    print(f"Retry succeeded: {output}")
+                    self.engine.update_step_state(task, step.id, StepState.COMPLETED, output=str(output))
+                return
+            except Exception as e:
+                await self._handle_step_failure(task, step, str(e), retry_count + 1)
+                return
+        
+        print("Initiating SELF-CORRECTION protocol...")
+        
+        # 1. Gather detailed history
         history = []
         for s in task.steps:
             status = s.state.value
             res = s.output if s.state == StepState.COMPLETED else (s.error or "")
-            history.append(f"Step {s.skill_name}: {status} => {res}")
+            # Include skill config for context
+            config_summary = str(s.skill_config)[:200] if s.skill_config else ""
+            history.append(f"Step {s.id} ({s.skill_name}): {status}\n  Config: {config_summary}\n  Result: {res}")
         history_str = "\n".join(history)
         
-        # 2. Ask Planner for Recovery Phase
+        # 2. Enhanced error context
+        error_context = f"""
+FAILED STEP: {step.id} ({step.skill_name})
+CONFIG: {step.skill_config}
+ERROR: {error}
+
+EXECUTION HISTORY:
+{history_str}
+"""
+        
+        # 3. Ask Planner for Recovery
         try:
-            recovery_steps = await self.planner.replan(task.goal, history_str, error)
+            recovery_steps = await self.planner.replan(task.goal, history_str, error_context)
             
             if not recovery_steps:
                 print("Planner could not find a fix. Task failed.")
@@ -250,27 +298,53 @@ CRITICAL INSTRUCTION:
 
             print(f"Planner suggests {len(recovery_steps)} recovery steps.")
             
-            # 3. Graft new steps
-            # We mark the current failed step as SKIPPED (so we move past it)
-            # And append new steps at the end? Or insert them?
-            # Recovery steps should replace the *rest* of the plan, or just fix this hole?
-            # Let's assume recovery steps are "The rest of the plan from here".
-            
-            # Mark current as FAILED but non-fatal?
-            # Or mark as SKIPPED with metadata "replaced".
+            # Mark current step as replaced
             self.engine.update_step_state(task, step.id, StepState.SKIPPED, error=f"Replaced by recovery: {error}")
             
-            # Cancel all PENDING steps (old plan)
+            # Cancel remaining PENDING steps
             for s in task.steps:
                 if s.state == StepState.PENDING:
                     self.engine.update_step_state(task, s.id, StepState.CANCELLED, error="Plan changed")
 
-            # Add new steps
+            # Add recovery steps
             for new_step in recovery_steps:
                 self.engine.add_step(task, new_step)
                 
             print("Plan updated. Resuming execution.")
 
         except Exception as replan_err:
-            print(f"Self-healing failed: {replan_err}")
+            print(f"Self-correction failed: {replan_err}")
             self.engine.update_step_state(task, step.id, StepState.FAILED, error=error)
+    
+    async def verify_code_change(self, project_path: str, command: str = None) -> Tuple[bool, str]:
+        """
+        Verify a code change by running a build/test command.
+        
+        Returns:
+            (success: bool, output: str)
+        """
+        if command is None:
+            # Auto-detect verification command
+            project = Path(project_path)
+            
+            if (project / "package.json").exists():
+                command = "npm run build"
+            elif (project / "pyproject.toml").exists():
+                command = "python -m py_compile"  # Basic syntax check
+            elif (project / "requirements.txt").exists():
+                command = "python -c 'import ast; [ast.parse(open(f).read()) for f in __import__(\"glob\").glob(\"**/*.py\", recursive=True)]'"
+            else:
+                return True, "No verification command available"
+        
+        try:
+            from orbit_agent.skills.shell import ShellCommandSkill, ShellInput
+            shell = ShellCommandSkill()
+            result = await shell.execute(ShellInput(cmd=command, cwd=project_path))
+            
+            if result.exit_code == 0:
+                return True, result.stdout
+            else:
+                return False, f"Exit code {result.exit_code}: {result.stderr}"
+        except Exception as e:
+            return False, str(e)
+

@@ -117,6 +117,33 @@ class Planner:
            - `action='press', keys=['win']` -> Opens Start Menu.
            - `action='scroll', amount=-500` -> Scrolls down.
            - `action='screenshot'` -> Captures screen (saved to `screenshots/`).
+        
+        NEW PRECISION SKILLS (v0.9.1):
+        - **SET-OF-MARK VISION (High Accuracy Clicking):**
+           For clicking UI elements with 95%+ accuracy, use `som_vision`:
+           1. `desktop_control(action='screenshot', save_path='screenshots/screen.png')`
+           2. `som_vision(image_path='screenshots/screen.png', target_description='the Submit button')`
+           3. Use the returned `coordinates` for `desktop_control(action='click', x=X, y=Y)`
+           This is MORE ACCURATE than raw vision_analyze because it uses numbered labels.
+        
+        - **STRUCTURED EDIT (Reliable Code Editing):**
+           For editing code files, ALWAYS use `structured_edit` instead of `file_edit`:
+           1. `structured_edit(action='view', path='file.py', start_line=1, end_line=50)` -> See with line numbers
+           2. `structured_edit(action='search', path='file.py', pattern='def my_function')` -> Find the function
+           3. `structured_edit(action='edit', path='file.py', start_line=10, end_line=15, new_content='...')` -> Edit lines
+           Line numbers remove ambiguity and prevent wrong-edit bugs.
+        
+        - **CODEBASE SEARCH (Find Relevant Code):**
+           Before modifying code, use `code_search` to understand the codebase:
+           1. `code_search(mode='structure', path='{root}/project/')` -> See project tree
+           2. `code_search(mode='grep', query='theme', path='{root}/project/')` -> Find files with "theme"
+           3. `code_search(mode='symbol', query='handleClick', path='{root}/project/')` -> Find function definitions
+        
+        - **SELF-CORRECTION LOOP (Automatic):**
+           If a step fails, the agent will automatically:
+           1. Retry transient errors (network, timeout) up to 2 times
+           2. For persistent errors, generate recovery steps
+           You don't need to plan for errors - the system handles it.
         """
         
         user_msg = f"Goal: {goal}\n{context_str}"

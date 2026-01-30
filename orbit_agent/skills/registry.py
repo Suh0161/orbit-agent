@@ -49,10 +49,22 @@ class SkillRegistry:
             if key:
                 from orbit_agent.skills.vision import VisionSkill
                 from orbit_agent.skills.visual_interaction import VisualInteractionSkill
+                from orbit_agent.skills.som_vision import SoMVisionSkill
                 
                 vision_skill = VisionSkill(key)
                 self.register_skill(vision_skill)
                 self.register_skill(VisualInteractionSkill(vision_skill))
+                
+                # Register Set-of-Mark Vision (precision clicking)
+                self.register_skill(SoMVisionSkill(key))
+        
+        # Structured Edit (SWE-agent style line-based editing)
+        from orbit_agent.skills.structured_edit import StructuredEditSkill
+        self.register_skill(StructuredEditSkill())
+        
+        # Codebase Search
+        from orbit_agent.skills.code_search import CodeSearchSkill
+        self.register_skill(CodeSearchSkill())
 
     def register_skill(self, skill: BaseSkill):
         self._skills[skill.config.name] = skill

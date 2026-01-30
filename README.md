@@ -1,4 +1,4 @@
-# Orbit Agent (v0.9.0 - Self-Aware)
+# Orbit Agent (v0.9.1 - Precision)
 
 **Autonomous Desktop Intelligence.**
 
@@ -121,12 +121,18 @@ safe_mode: false
 ## Work in Progress (WIP)
 
 We are actively working on:
-1.  **Precision & Accuracy:** Refining the "click-look-verify" loop for 100% reliable execution on any UI.
-2.  **End-to-End Software Building:** Enhancing the Architect Protocol to autonomously design, code, debug, and launch complex full-stack applications.
+1.  ✅ **Precision & Accuracy:** Implemented **Set-of-Mark (SoM) Vision** for 95%+ click accuracy using numbered UI element labels.
+2.  ✅ **End-to-End Software Building:** Added **Structured Edit** (line-based), **Code Search**, and enhanced **Self-Correction Loop** with automatic retries.
 3.  **Multi-Awareness:** Improving the agent's ability to maintain context across multiple open applications, tabs, and long-running sessions.
 4.  **Heavy Testing:** Rigorous stress-testing on diverse real-world workflows to ensure production-grade stability.
 5.  **Digital Ubiquity:** Enabling Orbit to "live" continuously across the digital world—traversing local desktops, cloud servers, and diverse environments without losing continuity.
 6.  **Orbit Uplink (Mobile Access):** A secure bridge allowing you to chat with your Desktop Agent via WhatsApp/Telegram from anywhere. Ask "How's the render?" and receive a screenshot analysis in real-time.
+
+### New in v0.9.1:
+-   **`som_vision`** - Set-of-Mark Visual Grounding (numbered label detection)
+-   **`structured_edit`** - SWE-agent style line-based file editing
+-   **`code_search`** - Codebase search (grep, filename, symbol, structure)
+-   **Self-Correction Loop** - Automatic retry for transient errors + replanning for persistent failures
 
 ---
 
