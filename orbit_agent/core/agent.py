@@ -12,6 +12,7 @@ from orbit_agent.models.router import ModelRouter
 from orbit_agent.core.planner import Planner
 from orbit_agent.memory.long_term import LongTermMemory
 from orbit_agent.memory.decision import DecisionLog
+from orbit_agent.memory.workspace_context import WorkspaceContext
 from orbit_agent.core.guardrail import GuardrailAgent
 
 class Agent:
@@ -25,11 +26,16 @@ class Agent:
         self.guardrail = GuardrailAgent(self.router)
         
         self.long_term_memory = LongTermMemory(config.memory.path, config.memory.collection_name)
+        self.workspace_context = WorkspaceContext(config.memory.path / "workspace_context.json")
         self.planner = Planner(self.router, self.skills, self.long_term_memory, config.workspace_root)
         self.decision_log = DecisionLog(config.memory.path / "decisions.jsonl")
 
     async def create_task(self, goal: str) -> Task:
-        steps = await self.planner.plan(goal)
+        # Include workspace context in planning
+        context_summary = self.workspace_context.get_context_summary()
+        enriched_goal = f"{goal}\n\n[Workspace Context]\n{context_summary}"
+        
+        steps = await self.planner.plan(enriched_goal)
         task = self.engine.create_task(goal, steps)
         await self.decision_log.add(f"Created task {task.id} for goal: {goal}")
         return task
@@ -89,6 +95,14 @@ CRITICAL INSTRUCTION:
         client = self.router.get_client("planning")
         try:
             response = await client.generate(msgs)
+            
+            # Record interaction for multi-awareness
+            self.workspace_context.record_interaction(
+                user_input=user_message,
+                agent_response=response.content[:500],
+                task_summary=user_message[:50]
+            )
+            
             return response.content
         except Exception as e:
             return f"Error interacting with AI: {e}"

@@ -1,4 +1,4 @@
-# Orbit Agent (v0.9.1 - Precision)
+# Orbit Agent (v0.9.2 - Unified)
 
 **Autonomous Desktop Intelligence.**
 
@@ -78,6 +78,29 @@ Low-latency command line interface.
 python -m orbit_agent.cli.main chat
 ```
 
+### 3. Orbit Uplink (Mobile Access) 🛰️
+Control your desktop from your phone via Telegram.
+
+```bash
+# 1. Install dependency
+pip install python-telegram-bot
+
+# 2. Get a bot token from @BotFather on Telegram
+
+# 3. Add to your .env file:
+#    TELEGRAM_BOT_TOKEN=your_token_here
+#    ORBIT_UPLINK_USERS=your_telegram_id
+
+# 4. Run the uplink daemon
+python -m orbit_agent.uplink.main
+```
+
+Then message your bot on Telegram:
+-   **"What's on my screen?"** - Takes screenshot, analyzes, responds
+-   **"Open VS Code"** - Controls your desktop remotely
+-   **"/screenshot"** - Sends you your current screen
+-   **"/status"** - Shows workspace status
+
 ---
 
 ## Configuration
@@ -123,16 +146,17 @@ safe_mode: false
 We are actively working on:
 1.  ✅ **Precision & Accuracy:** Implemented **Set-of-Mark (SoM) Vision** for 95%+ click accuracy using numbered UI element labels.
 2.  ✅ **End-to-End Software Building:** Added **Structured Edit** (line-based), **Code Search**, and enhanced **Self-Correction Loop** with automatic retries.
-3.  **Multi-Awareness:** Improving the agent's ability to maintain context across multiple open applications, tabs, and long-running sessions.
+3.  ✅ **Multi-Awareness:** Implemented **Workspace Context** to track active windows, file changes, and maintain session history across apps.
 4.  **Heavy Testing:** Rigorous stress-testing on diverse real-world workflows to ensure production-grade stability.
 5.  **Digital Ubiquity:** Enabling Orbit to "live" continuously across the digital world—traversing local desktops, cloud servers, and diverse environments without losing continuity.
-6.  **Orbit Uplink (Mobile Access):** A secure bridge allowing you to chat with your Desktop Agent via WhatsApp/Telegram from anywhere. Ask "How's the render?" and receive a screenshot analysis in real-time.
+6.  ✅ **Orbit Uplink (Mobile Access):** Implemented a secure **Telegram Bot Bridge** allowing full desktop control and vision from your phone.
 
-### New in v0.9.1:
--   **`som_vision`** - Set-of-Mark Visual Grounding (numbered label detection)
--   **`structured_edit`** - SWE-agent style line-based file editing
--   **`code_search`** - Codebase search (grep, filename, symbol, structure)
--   **Self-Correction Loop** - Automatic retry for transient errors + replanning for persistent failures
+### New in v0.9.2:
+-   **Orbit Uplink** - Control your PC from Telegram (Chat, Vision, Screenshots)
+-   **Multi-Awareness** - Workspace Context tracking for smarter planning
+-   **`som_vision`** - Set-of-Mark Visual Grounding
+-   **`structured_edit`** - SWE-agent style editing
+-   **`code_search`** - Codebase search
 
 ---
 
