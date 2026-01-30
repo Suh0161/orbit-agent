@@ -1,0 +1,40 @@
+[project]
+name = "orbit-agent"
+version = "0.1.0"
+description = "A reliable, resumable, and safe local-first AI agent."
+requires-python = ">=3.11"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Orbit Agent Architect", email = "architect@orbit.local"}
+]
+dependencies = [
+    "pydantic>=2.0",
+    "typer[all]>=0.9.0",
+    "pyyaml>=6.0",
+    "rich>=13.0",
+    "chromadb>=0.4.0",
+    "openai>=1.0",
+    "aiofiles>=23.0",
+    "tenacity>=8.0",
+    "beautifulsoup4>=4.12",
+    "duckduckgo-search>=4.0",
+    "ast-grep-py>=0.1.0",
+    "pyautogui>=0.9",
+    "pillow>=10.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21"
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["orbit_agent/tests"]
+pythonpath = ["."]

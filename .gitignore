@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Distribution
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environments
+.env
+.venv
+venv/
+env/
+
+# IDEs
+.vscode/
+.idea/
+
+# Orbit Agent Specific
+orbit_workspace/
+.orbit/
+data/memory/
+data/chroma/
+screenshots/
+orbit_config.yaml
+orbit.log
+routines.jsonl
+image/architecture.png
