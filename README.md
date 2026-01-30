@@ -45,7 +45,6 @@ cd orbit
 
 # 2. Install Dependencies
 pip install -r requirements.txt
-pip install PyQt6 qasync playwright mss pyautogui python-dotenv
 playwright install
 
 # 3. Setup Secrets
@@ -78,18 +77,21 @@ Low-latency command line interface.
 python -m orbit_agent.cli.main chat
 ```
 
-### 3. Orbit Uplink (Mobile Access) 🛰️
+### 3. Orbit Uplink (Mobile Access)
 Control your desktop from your phone via Telegram.
 
 ```bash
-# 1. Install dependency
-pip install python-telegram-bot
+# 1. Ensure Dependencies are installed
+pip install -r requirements.txt
 
-# 2. Get a bot token from @BotFather on Telegram
+# 2. Configure Telegram Bot
+# - Message @BotFather on Telegram to create a bot
+# - Get your token
 
-# 3. Add to your .env file:
-#    TELEGRAM_BOT_TOKEN=your_token_here
-#    ORBIT_UPLINK_USERS=your_telegram_id
+# 3. Update Configuration
+# Add to your .env file:
+# TELEGRAM_BOT_TOKEN=your_token_here
+# ORBIT_UPLINK_USERS=your_telegram_id
 
 # 4. Run the uplink daemon
 python -m orbit_agent.uplink.main
@@ -144,12 +146,12 @@ safe_mode: false
 ## Work in Progress (WIP)
 
 We are actively working on:
-1.  ✅ **Precision & Accuracy:** Implemented **Set-of-Mark (SoM) Vision** for 95%+ click accuracy using numbered UI element labels.
-2.  ✅ **End-to-End Software Building:** Added **Structured Edit** (line-based), **Code Search**, and enhanced **Self-Correction Loop** with automatic retries.
-3.  ✅ **Multi-Awareness:** Implemented **Workspace Context** to track active windows, file changes, and maintain session history across apps.
+1.  **Precision & Accuracy (Implemented):** Implemented **Set-of-Mark (SoM) Vision** for 95%+ click accuracy using numbered UI element labels.
+2.  **End-to-End Software Building (Implemented):** Added **Structured Edit** (line-based), **Code Search**, and enhanced **Self-Correction Loop** with automatic retries.
+3.  **Multi-Awareness (Implemented):** Implemented **Workspace Context** to track active windows, file changes, and maintain session history across apps.
 4.  **Heavy Testing:** Rigorous stress-testing on diverse real-world workflows to ensure production-grade stability.
 5.  **Digital Ubiquity:** Enabling Orbit to "live" continuously across the digital world—traversing local desktops, cloud servers, and diverse environments without losing continuity.
-6.  ✅ **Orbit Uplink (Mobile Access):** Implemented a secure **Telegram Bot Bridge** allowing full desktop control and vision from your phone.
+6.  **Orbit Uplink (Mobile Access) (Implemented):** Implemented a secure **Telegram Bot Bridge** allowing full desktop control and vision from your phone.
 
 ### New in v0.9.2:
 -   **Orbit Uplink** - Control your PC from Telegram (Chat, Vision, Screenshots)
