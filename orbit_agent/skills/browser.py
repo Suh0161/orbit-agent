@@ -47,7 +47,7 @@ class BrowserSkill(BaseSkill):
             self.playwright = await async_playwright().start()
         
         if not self.browser:
-            print(f"[BrowserSkill] Launching Chromium (FORCED VISIBLE)...")
+            print("[BrowserSkill] Launching Chromium (visible)...")
             self.browser = await self.playwright.chromium.launch(headless=False, slow_mo=500)
             self.context = await self.browser.new_context()
             page = await self.context.new_page()
@@ -125,7 +125,7 @@ class BrowserSkill(BaseSkill):
                             await asyncio.sleep(1.0)
 
                     # Click Cookie Buttons
-                    targets = ["Accept all", "Accept", "I agree", "Agree", "Allow all", "Consent"]
+                    targets = ["Accept all", "Accept", "I agree", "Agree", "Allow all", "Allow", "Consent", "Got it", "Okay"]
                     for t in targets:
                         try:
                             btn = page.get_by_role("button", name=t, exact=False)

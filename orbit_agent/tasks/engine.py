@@ -25,14 +25,15 @@ class TaskEngine:
         """Save task state to disk for resumability."""
         task.updated_at = datetime.utcnow()
         file_path = self.persistence_path / f"{task.id}.json"
-        with open(file_path, "w") as f:
+        # Always write UTF-8 to avoid Windows cp1252 encoding crashes on unicode.
+        with open(file_path, "w", encoding="utf-8") as f:
             f.write(task.model_dump_json(indent=2))
 
     def load_task(self, task_id: UUID) -> Optional[Task]:
         file_path = self.persistence_path / f"{task_id}.json"
         if not file_path.exists():
             return None
-        with open(file_path, "r") as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return Task(**data)
 
@@ -41,7 +42,8 @@ class TaskEngine:
         Identify steps that are PENDING and have all dependencies COMPLETED.
         """
         runnable = []
-        completed_ids = {s.id for s in task.steps if s.state == StepState.COMPLETED}
+        # Treat SKIPPED as terminal-success for dependency unblocking (plan changes, replaced steps, etc.)
+        completed_ids = {s.id for s in task.steps if s.state in (StepState.COMPLETED, StepState.SKIPPED)}
         
         for step in task.steps:
             if step.state in [StepState.PENDING, StepState.FAILED]:
@@ -77,7 +79,8 @@ class TaskEngine:
         """Check if all steps are done, update task state."""
         if not task.steps: return False
         
-        if all(s.state == StepState.COMPLETED for s in task.steps):
+        # SKIPPED is a valid terminal state when a plan changes; it should not prevent completion.
+        if all(s.state in (StepState.COMPLETED, StepState.SKIPPED) for s in task.steps):
             task.state = TaskState.COMPLETED
             self.save_task(task)
             return True

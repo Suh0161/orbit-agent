@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Type
 from pydantic import BaseModel, Field
 import aiofiles
+import os
 
 from orbit_agent.skills.base import BaseSkill, SkillConfig
 
@@ -35,6 +36,28 @@ class FileEditSkill(BaseSkill):
 
     async def execute(self, inputs: FileEditInput) -> FileEditOutput:
         path = Path(inputs.path)
+
+        if not path.is_absolute():
+            return FileEditOutput(success=False, path=inputs.path, error="Path must be absolute")
+
+        # Refuse edits in protected system locations
+        try:
+            p = path.resolve()
+        except Exception:
+            p = path
+
+        protected_roots = [
+            Path(os.environ.get("SystemRoot", r"C:\Windows")),
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")),
+            Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")),
+        ]
+        for root in protected_roots:
+            try:
+                if p.is_relative_to(root.resolve()):
+                    return FileEditOutput(success=False, path=inputs.path, error=f"Refusing to edit protected system path: {root}")
+            except Exception:
+                if str(p).lower().startswith(str(root).lower()):
+                    return FileEditOutput(success=False, path=inputs.path, error=f"Refusing to edit protected system path: {root}")
         
         if not path.exists():
             return FileEditOutput(success=False, path=inputs.path, error="File not found")

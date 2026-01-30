@@ -1,6 +1,6 @@
 import base64
 from pathlib import Path
-from typing import Type, Optional, List, Dict, Any
+from typing import Type, Optional, List, Dict, Any, Literal
 from pydantic import BaseModel, Field
 
 from orbit_agent.skills.base import BaseSkill, SkillConfig
@@ -19,24 +19,29 @@ class VisionInput(BaseModel):
     image_path: str = Field(description="Absolute path to the image file to analyze.")
     query: str = Field(description="Query about the image. If mode is 'locate', describe WHAT to find (e.g. 'the submit button').")
     mode: VisionMode = Field(default=VisionMode.DESCRIBE, description="Mode: 'describe' (text) or 'locate' (returns x,y coordinates).")
+    expect: Optional[Literal["yes", "no"]] = Field(
+        default=None,
+        description="Optional assertion. If set, the model must answer YES/NO and the skill will fail if it doesn't match."
+    )
 
 class VisionOutput(BaseModel):
+    success: bool = True
     analysis: str
     coordinates: Optional[List[int]] = Field(default=None, description="[x, y] coordinates if mode was 'locate'")
     error: Optional[str] = None
 
 class VisionSkill(BaseSkill):
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, model_name: str = "gpt-5.1"):
         super().__init__()
         self.api_key = api_key
-        # We use a dedicated client for vision, defaulting to gpt-5.1
-        self.client = OpenAIClient(api_key=self.api_key, model_name="gpt-4o")
+        # Use the same model as the main agent by default (configurable via SkillRegistry).
+        self.client = OpenAIClient(api_key=self.api_key, model_name=model_name)
 
     @property
     def default_config(self) -> SkillConfig:
         return SkillConfig(
             name="vision_analyze",
-            description="Analyzes an image using GPT-4 Vision. Pass the path to a screenshot/image and a query. Use mode='locate' to get (x,y) coordinates of an element.",
+            description="Analyzes an image using the configured OpenAI vision-capable model. Pass the path to a screenshot/image and a query. Use mode='locate' to get (x,y) coordinates of an element.",
             permissions_required=["vision_analyze"]
         )
 
@@ -57,7 +62,7 @@ class VisionSkill(BaseSkill):
                 if fallback.exists():
                     path = fallback
                 else:
-                    return VisionOutput(analysis="", error=f"Image not found at {inputs.image_path} or {fallback}")
+                    return VisionOutput(success=False, analysis="", error=f"Image not found at {inputs.image_path} or {fallback}")
             
             # Encode image
             with open(path, "rb") as image_file:
@@ -65,6 +70,11 @@ class VisionSkill(BaseSkill):
             
             # Use 'describe' logic by default
             prompt_text = inputs.query
+            if inputs.expect is not None and inputs.mode != VisionMode.LOCATE:
+                prompt_text = (
+                    f"{inputs.query}\n\n"
+                    "Answer with a single word: YES or NO."
+                )
             
             # If LOCATE mode, override prompt
             if inputs.mode == VisionMode.LOCATE:
@@ -98,6 +108,15 @@ class VisionSkill(BaseSkill):
             
             response = await self.client.generate(messages)
             text_response = response.content.strip()
+
+            # Assertion mode (YES/NO) for DESCRIBE
+            if inputs.expect is not None and inputs.mode != VisionMode.LOCATE:
+                lower = text_response.lower()
+                got = "yes" if "yes" in lower else ("no" if "no" in lower else None)
+                if got is None:
+                    return VisionOutput(success=False, analysis=text_response, error="Expected YES/NO but could not parse answer.")
+                ok = (got == inputs.expect)
+                return VisionOutput(success=ok, analysis=text_response, error=None if ok else f"Expected {inputs.expect.upper()} but got {got.upper()}.")
             
             # Parse output if LOCATE
             if inputs.mode == VisionMode.LOCATE:
@@ -124,17 +143,17 @@ class VisionSkill(BaseSkill):
                         # Calculate Center
                         center_x = int((xmin + xmax) / 2)
                         center_y = int((ymin + ymax) / 2)
-                        return VisionOutput(analysis=f"Located box {box}, center at {center_x},{center_y}", coordinates=[center_x, center_y])
+                        return VisionOutput(success=True, analysis=f"Located box {box}, center at {center_x},{center_y}", coordinates=[center_x, center_y])
                         
                     elif point and len(point) == 2:
-                         return VisionOutput(analysis=f"Located point at {point}", coordinates=point)
+                         return VisionOutput(success=True, analysis=f"Located point at {point}", coordinates=point)
                     else:
-                        return VisionOutput(analysis=text_response, error="JSON parsed but no 'box_2d' or 'point' found")
+                        return VisionOutput(success=False, analysis=text_response, error="JSON parsed but no 'box_2d' or 'point' found")
                 except Exception as e:
-                    return VisionOutput(analysis=text_response, error=f"Failed to parse location JSON: {e}")
+                    return VisionOutput(success=False, analysis=text_response, error=f"Failed to parse location JSON: {e}")
 
-            return VisionOutput(analysis=text_response)
+            return VisionOutput(success=True, analysis=text_response)
  
         except Exception as e:
-            return VisionOutput(analysis="", error=str(e))
+            return VisionOutput(success=False, analysis="", error=str(e))
 

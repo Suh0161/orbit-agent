@@ -21,6 +21,7 @@ dependencies = [
     "duckduckgo-search>=4.0",
     "ast-grep-py>=0.1.0",
     "pyautogui>=0.9",
+    "pydirectinput",
     "pillow>=10.0"
 ]
 

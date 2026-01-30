@@ -14,14 +14,14 @@ class UICache:
         if not self.cache_file.exists():
             return {}
         try:
-            with open(self.cache_file, "r") as f:
+            with open(self.cache_file, "r", encoding="utf-8") as f:
                 return json.load(f)
         except:
             return {}
 
     def _save_cache(self):
-        with open(self.cache_file, "w") as f:
-            json.dump(self.cache, f, indent=2)
+        with open(self.cache_file, "w", encoding="utf-8") as f:
+            json.dump(self.cache, f, indent=2, ensure_ascii=False)
 
     def get(self, key: str) -> Optional[List[int]]:
         """Retrieve coordinates for a description key."""

@@ -20,7 +20,7 @@ class RoutineMemory:
     def _load(self):
         if self.path.exists():
             try:
-                with open(self.path, "r") as f:
+                with open(self.path, "r", encoding="utf-8") as f:
                     raw = json.load(f)
                     for k, v in raw.items():
                         self._data[k] = Routine(**v)
@@ -31,8 +31,8 @@ class RoutineMemory:
         keys = list(self._data.keys())
         dump = {k: self._data[k].model_dump() for k in keys}
         try:
-            with open(self.path, "w") as f:
-                json.dump(dump, f, indent=2)
+            with open(self.path, "w", encoding="utf-8") as f:
+                json.dump(dump, f, indent=2, ensure_ascii=False)
         except Exception as e:
              print(f"[RoutineMemory] Failed to save: {e}")
 

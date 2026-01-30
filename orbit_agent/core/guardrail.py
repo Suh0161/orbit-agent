@@ -10,6 +10,9 @@ class GuardrailAgent:
     """
     def __init__(self, router: ModelRouter):
         self.router = router
+        # Use the router's default client directly so tests can mock planning
+        # without accidentally hijacking guardrail decisions.
+        self.client = getattr(router, "default_client", None)
         # We use a strict prompt
         self.system_prompt = """
         You are the Safety Guardrail for an Autonomous Desktop Agent.
@@ -45,7 +48,7 @@ class GuardrailAgent:
         # Construct prompt
         msg = self.system_prompt.format(skill_name=skill_name, input_data=str(input_data))
         
-        client = self.router.get_client("planning") # Use same brain for now
+        client = self.client or self.router.get_client("default")
         response = await client.generate([Message(role="user", content=msg)], temperature=0.0)
         
         content = response.content.strip()

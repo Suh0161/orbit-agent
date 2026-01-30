@@ -1,4 +1,9 @@
 from typing import Dict, Type, Any, Optional
+import importlib.util
+import inspect
+import sys
+import time
+from pathlib import Path
 from orbit_agent.config.config import OrbitConfig
 from orbit_agent.skills.base import BaseSkill
 from orbit_agent.skills.file import FileReadSkill, FileWriteSkill
@@ -9,6 +14,56 @@ class SkillRegistry:
         self.config = config
         self._skills: Dict[str, BaseSkill] = {}
         self._register_defaults()
+
+    def register_skill_from_file(
+        self,
+        file_path: str,
+        class_name: Optional[str] = None,
+        init_kwargs: Optional[dict] = None,
+        module_name: Optional[str] = None,
+    ) -> str:
+        """
+        Dynamically load a Python file defining a BaseSkill subclass and register it immediately.
+        Enables hot-loading new skills WITHOUT restarting the agent.
+        """
+        p = Path(file_path).expanduser().resolve()
+        if not p.exists():
+            raise FileNotFoundError(str(p))
+
+        # Use a unique module name to avoid caching & class-identity issues.
+        if not module_name:
+            module_name = f"orbit_dynamic_skill_{p.stem}_{int(time.time() * 1000)}"
+
+        spec = importlib.util.spec_from_file_location(module_name, str(p))
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Failed to create import spec for {p}")
+
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)  # type: ignore[attr-defined]
+
+        # Find a BaseSkill subclass to instantiate
+        skill_cls = None
+        if class_name:
+            skill_cls = getattr(module, class_name, None)
+        else:
+            for _, obj in inspect.getmembers(module, inspect.isclass):
+                if obj is BaseSkill:
+                    continue
+                try:
+                    if issubclass(obj, BaseSkill) and obj.__module__ == module.__name__:
+                        skill_cls = obj
+                        break
+                except Exception:
+                    continue
+
+        if skill_cls is None:
+            raise ValueError(f"No BaseSkill subclass found in {p} (class_name={class_name})")
+
+        kwargs = init_kwargs or {}
+        skill: BaseSkill = skill_cls(**kwargs) if kwargs else skill_cls()
+        self.register_skill(skill)
+        return skill.config.name
 
     def _register_defaults(self):
         self.register_skill(FileReadSkill())
@@ -51,20 +106,29 @@ class SkillRegistry:
                 from orbit_agent.skills.visual_interaction import VisualInteractionSkill
                 from orbit_agent.skills.som_vision import SoMVisionSkill
                 
-                vision_skill = VisionSkill(key)
+                model_name = (self.config.model.model_name if self.config else "gpt-5.1")
+                vision_skill = VisionSkill(key, model_name=model_name)
                 self.register_skill(vision_skill)
                 self.register_skill(VisualInteractionSkill(vision_skill))
                 
                 # Register Set-of-Mark Vision (precision clicking)
-                self.register_skill(SoMVisionSkill(key))
+                self.register_skill(SoMVisionSkill(key, model_name=model_name))
         
-        # Structured Edit (SWE-agent style line-based editing)
+        # Structured Edit (line-based editing)
         from orbit_agent.skills.structured_edit import StructuredEditSkill
         self.register_skill(StructuredEditSkill())
         
         # Codebase Search
         from orbit_agent.skills.code_search import CodeSearchSkill
         self.register_skill(CodeSearchSkill())
+        
+        # Chat Skill (Agent Voice)
+        from orbit_agent.skills.chat import ChatSkill
+        self.register_skill(ChatSkill())
+
+        # Self-extension (hot-loaded skills)
+        from orbit_agent.skills.skill_create import SkillCreateSkill
+        self.register_skill(SkillCreateSkill(self, self.config))
 
     def register_skill(self, skill: BaseSkill):
         self._skills[skill.config.name] = skill

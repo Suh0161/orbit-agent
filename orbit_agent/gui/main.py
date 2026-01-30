@@ -1,7 +1,6 @@
 import sys
 import asyncio
 import qasync
-import mss
 import os
 import tempfile
 from datetime import datetime
@@ -362,15 +361,16 @@ class OrbitWidget(QWidget):
 
     def _capture_core(self):
         try:
-            print("Capturing with MSS...", flush=True)
+            print("Capturing screenshot...", flush=True)
             screenshot_dir = os.path.join(os.getcwd(), "screenshots")
             os.makedirs(screenshot_dir, exist_ok=True)
             
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filepath = os.path.join(screenshot_dir, f"vision_{timestamp}.png")
-            
-            with mss.mss() as sct:
-                sct.shot(mon=1, output=filepath)
+
+            # Use PyAutoGUI screenshot (more reliable for GPU-accelerated windows than MSS on Windows)
+            import pyautogui
+            pyautogui.screenshot(filepath)
             
             print(f"Snapshot saved: {filepath}", flush=True)
             self.current_screenshot = filepath

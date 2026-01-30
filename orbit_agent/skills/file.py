@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 from typing import Type
 from pydantic import BaseModel, Field
 import aiofiles
@@ -75,6 +76,29 @@ class FileWriteSkill(BaseSkill):
 
     async def execute(self, inputs: FileWriteInput) -> FileWriteOutput:
         path = Path(inputs.path)
+
+        if not path.is_absolute():
+            return FileWriteOutput(success=False, path=inputs.path, error="Path must be absolute")
+
+        # Refuse writing into protected system locations (prevents nuking System32, etc.)
+        try:
+            p = path.resolve()
+        except Exception:
+            p = path
+
+        protected_roots = [
+            Path(os.environ.get("SystemRoot", r"C:\Windows")),
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")),
+            Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")),
+        ]
+        for root in protected_roots:
+            try:
+                if p.is_relative_to(root.resolve()):
+                    return FileWriteOutput(success=False, path=inputs.path, error=f"Refusing to write into protected system path: {root}")
+            except Exception:
+                # Fallback for older semantics / odd paths
+                if str(p).lower().startswith(str(root).lower()):
+                    return FileWriteOutput(success=False, path=inputs.path, error=f"Refusing to write into protected system path: {root}")
         
         if path.exists() and not inputs.overwrite:
             return FileWriteOutput(success=False, path=inputs.path, error="File exists and overwrite is False")

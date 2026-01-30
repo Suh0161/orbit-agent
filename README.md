@@ -1,8 +1,8 @@
-# Orbit Agent (v0.9.2 - Unified)
+# Orbit Agent (v0.9.4)
 
 **Autonomous Desktop Intelligence.**
 
-Orbit is a local-first AI agent designed to operate your computer with the same dexterity and reasoning as a human user. It integrates Vision (GPT-4V), Planning (Chain-of-Thought), and precise Tooling to execute complex workflows—from coding entire applications to rapid web research—while keeping you in the loop.
+Orbit is a local-first AI agent designed to operate your computer with the same dexterity and reasoning as a human user. It integrates Vision (GPT-5.1), Planning, and precise Tooling to execute complex workflows—from coding entire applications to rapid web research—while keeping you in the loop.
 
 > "A Junior Engineer with Senior Guardrails."
 
@@ -102,6 +102,33 @@ Then message your bot on Telegram:
 -   **"Open VS Code"** - Controls your desktop remotely
 -   **"/screenshot"** - Sends you your current screen
 -   **"/status"** - Shows workspace status
+-   **"what model ru it"** - Reports the real configured model (deterministic, not LLM guessing)
+
+**Game control tip (DirectX/fullscreen):**
+- Install `pydirectinput` (included in `requirements.txt`)
+- Set `ORBIT_DESKTOP_INPUT_BACKEND=direct` in your `.env`
+
+**Flights tip (actually reads the tabs):**
+- Example: `find me cheapest flight from KL to japan 11 feb to 20 feb 2 people`
+- Uplink opens Google Flights + Skyscanner in separate tabs, reads them, and summarizes the cheapest option it can see.
+
+#### Proactive mode (reminders / daily jobs / heartbeat)
+Uplink can run scheduled jobs and check-ins (Telegram-only for now):
+- `/remind <minutes> <goal...>` — one-off reminder that runs a goal later
+- `/daily HH:MM <goal...>` — run a goal every day at a time
+- `/jobs` — list your scheduled jobs
+- `/cancel <job_id>` — cancel a job
+- `/heartbeat <minutes>` / `/heartbeat off` — periodic check-in messages
+
+Jobs are persisted to `data/uplink/jobs.json`.
+
+#### Always-on (Windows autostart)
+You can install a Windows Scheduled Task to start Uplink on login:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+.\scripts\install_uplink_autostart.ps1
+```
 
 ---
 
@@ -115,10 +142,11 @@ Orbit looks for `.env` for secrets and `orbit_config.yaml` for preferences.
 # Set to 'false' to allow fully autonomous execution (no "Allow?" popups)
 safe_mode: false 
 
-  provider: "openai" # Options: openai, deepseek, xai (grok), local (ollama)
-  model_name: "gpt-4-turbo" # or "grok-beta", "deepseek-chat"
+model:
+  provider: "openai"          # Options: openai, deepseek, xai (grok), local (ollama)
+  model_name: "gpt-5.1"       # Used for planning + vision (and SoM Vision)
   api_key_env_var: "OPENAI_API_KEY"
-  # base_url: "https://api.x.ai/v1" # Uncomment for Grok
+  # base_url: "https://api.x.ai/v1"        # Uncomment for Grok
   # base_url: "http://localhost:11434/v1" # Uncomment for Ollama/Local
 ```
 
@@ -127,7 +155,7 @@ safe_mode: false
 ## Cost & Efficiency
 
 -   **High Efficiency:** Orbit uses a "Planning" architecture. It pays for thinking once, then executes 10-20 steps (coding, file ops) for free using local Python code.
--   **Heavy Usage:** **Vision** features (Screen Analysis) send screenshots to GPT-5.1. This is token-heavy (~1k tokens per look).
+-   **Heavy Usage:** **Vision** features (Screen Analysis) send screenshots to GPT-5.1. This is token-heavy.
     -   *Recommendation:* Use the CLI/Chat for coding tasks. Use the GUI Vision features for specific, high-value visual problems until we release **Local Vision** support.
 
 ---
@@ -140,25 +168,18 @@ safe_mode: false
 -   **Skills:** `orbit_agent.skills` (Vision, Desktop, Browser, file I/O)
 -   **GUI:** `orbit_agent.gui` (PyQt6 Asynchronous)
 -   **Memory:** Ephemeral (RAM) + Persistent Routines (`jsonl`).
+-   **Run traces (debugging):** `memory/runs/<task_id>.jsonl` (planning + step execution events).
 
 ---
 
-## Work in Progress (WIP)
+## What's new in v0.9.4 (Reliability + Uplink)
 
-We are actively working on:
-1.  **Precision & Accuracy (Implemented):** Implemented **Set-of-Mark (SoM) Vision** for 95%+ click accuracy using numbered UI element labels.
-2.  **End-to-End Software Building (Implemented):** Added **Structured Edit** (line-based), **Code Search**, and enhanced **Self-Correction Loop** with automatic retries.
-3.  **Multi-Awareness (Implemented):** Implemented **Workspace Context** to track active windows, file changes, and maintain session history across apps.
-4.  **Heavy Testing:** Rigorous stress-testing on diverse real-world workflows to ensure production-grade stability.
-5.  **Digital Ubiquity:** Enabling Orbit to "live" continuously across the digital world—traversing local desktops, cloud servers, and diverse environments without losing continuity.
-6.  **Orbit Uplink (Mobile Access) (Implemented):** Implemented a secure **Telegram Bot Bridge** allowing full desktop control and vision from your phone.
-
-### New in v0.9.2:
--   **Orbit Uplink** - Control your PC from Telegram (Chat, Vision, Screenshots)
--   **Multi-Awareness** - Workspace Context tracking for smarter planning
--   **`som_vision`** - Set-of-Mark Visual Grounding
--   **`structured_edit`** - SWE-agent style editing
--   **`code_search`** - Codebase search
+- **Game input reliability**: `computer_control` supports `backend=auto|pyautogui|direct` (DirectX/fullscreen games work best with `pydirectinput`).
+- **Uplink flight searches actually work end-to-end**: opens Google Flights + Skyscanner, reads tabs, summarizes cheapest option it can see.
+- **No more "Done" hallucinations**: state-changing actions are tracked; if there's no verification, Uplink will say `Done (not verified). ⚠️`.
+- **Recovery replanning**: when a step fails, Uplink can request a recovery plan (bounded by `ORBIT_UPLINK_REPLAN_MAX`).
+- **Windows robustness**: all task + memory JSON persistence is now UTF-8, avoiding `charmap codec can't encode …` crashes.
+- **Deterministic model reporting**: asking “what model…” returns the configured model, not an LLM guess.
 
 ---
 

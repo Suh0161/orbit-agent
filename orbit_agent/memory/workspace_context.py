@@ -87,7 +87,7 @@ class WorkspaceContext:
         """Load context from disk."""
         if self.context_path.exists():
             try:
-                with open(self.context_path, 'r') as f:
+                with open(self.context_path, 'r', encoding="utf-8") as f:
                     data = json.load(f)
                     self.session_memories = [
                         SessionMemory(**m) for m in data.get('session_memories', [])
@@ -106,8 +106,8 @@ class WorkspaceContext:
                 'recent_files': [asdict(fa) for fa in list(self.file_activities)[-20:]],
                 'last_saved': time.time()
             }
-            with open(self.context_path, 'w') as f:
-                json.dump(data, f, indent=2)
+            with open(self.context_path, 'w', encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:
             print(f"[WorkspaceContext] Failed to save context: {e}")
     

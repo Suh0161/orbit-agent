@@ -146,10 +146,10 @@ class SoMVisionSkill(BaseSkill):
     4. Return precise coordinates
     """
     
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, model_name: str = "gpt-5.1"):
         super().__init__()
         self.api_key = api_key
-        self.client = OpenAIClient(api_key=self.api_key, model_name="gpt-4o")
+        self.client = OpenAIClient(api_key=self.api_key, model_name=model_name)
         self.detector = UIElementDetector()
     
     @property

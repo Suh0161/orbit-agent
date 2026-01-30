@@ -14,6 +14,7 @@ from orbit_agent.memory.long_term import LongTermMemory
 from orbit_agent.memory.decision import DecisionLog
 from orbit_agent.memory.workspace_context import WorkspaceContext
 from orbit_agent.core.guardrail import GuardrailAgent
+from orbit_agent.core.trace import RunTrace
 
 class Agent:
     def __init__(self, config: OrbitConfig, interactive: bool = True):
@@ -37,6 +38,17 @@ class Agent:
         
         steps = await self.planner.plan(enriched_goal)
         task = self.engine.create_task(goal, steps)
+        try:
+            trace = RunTrace.for_task(self.config.memory.path / "runs", str(task.id))
+            trace.write(
+                "planned",
+                {
+                    "goal": goal,
+                    "steps": [{"id": s.id, "skill": s.skill_name, "config": s.skill_config} for s in steps],
+                },
+            )
+        except Exception:
+            pass
         await self.decision_log.add(f"Created task {task.id} for goal: {goal}")
         return task
     async def chat(self, user_message: str, image_path: Optional[str] = None) -> str:
@@ -126,6 +138,14 @@ CRITICAL INSTRUCTION:
             return
 
         print(f"Resuming Task {task.id}: {task.goal}")
+        trace: Optional[RunTrace] = None
+        try:
+            trace = RunTrace.for_task(self.config.memory.path / "runs", str(task.id))
+            trace.write("start", {"goal": task.goal})
+        except Exception:
+            trace = None
+        task.state = TaskState.RUNNING
+        self.engine.save_task(task)
         
         while task.state not in [TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED]:
             runnable_steps = self.engine.get_runnable_steps(task)
@@ -134,6 +154,11 @@ CRITICAL INSTRUCTION:
                 # Check completion
                 if self.engine.check_task_completion(task):
                     print(f"Task {task.id} finished with state: {task.state}")
+                    if trace:
+                        try:
+                            trace.write("end", {"state": task.state.value})
+                        except Exception:
+                            pass
                     # Save to Muscle Memory if successful
                     if task.state == TaskState.COMPLETED:
                         self.planner.routines.save_routine(task.goal, task.steps)
@@ -197,6 +222,7 @@ CRITICAL INSTRUCTION:
                                         step.skill_config["approved"] = True
                                     else:
                                         print(f"Step {step.id} waiting for approval via CLI (permission: {perm})...")
+                                        self.engine.update_step_state(task, step.id, StepState.BLOCKED, error=f"Waiting for approval ({perm})")
                                         allowed = False
                                         break
                 
@@ -207,32 +233,109 @@ CRITICAL INSTRUCTION:
                     # If we just 'continue', we'll loop rapidly.
                     await asyncio.sleep(2)
                     continue 
+
+                # 2b. Guardrail enforcement for high-risk skills (even when autonomous)
+                if step.skill_name in {"shell_command", "file_write", "file_edit", "skill_create"}:
+                    try:
+                        ok, reason = await self.guardrail.check(step.skill_name, dict(step.skill_config))
+                    except Exception as guardrail_err:
+                        # If guardrail is unavailable (e.g., missing API key in tests/offline),
+                        # do not hard-fail the task. Log and continue.
+                        await self.decision_log.add(
+                            "Guardrail check skipped (unavailable)",
+                            metadata={"skill": step.skill_name, "error": str(guardrail_err)[:200]},
+                        )
+                        ok, reason = True, ""
+                    if not ok:
+                        self.engine.update_step_state(task, step.id, StepState.FAILED, error=f"Guardrail REJECT: {reason}")
+                        continue
                 
                 # 3. Execution
                 print(f"Running step {step.id} ({step.skill_name})...")
                 self.engine.update_step_state(task, step.id, StepState.RUNNING)
+                if trace:
+                    try:
+                        trace.write("step_start", {"step_id": step.id, "skill": step.skill_name, "config": step.skill_config})
+                    except Exception:
+                        pass
                 
                 try:
                     # Validate Inputs
+                    # Chain: if previous step was som_vision and returned coordinates, inject into next click if missing.
+                    # This mirrors Uplink behavior and prevents planners from needing to guess x/y.
+                    if (
+                        step.skill_name == "computer_control"
+                        and str(step.skill_config.get("action", "")).lower() == "click"
+                        and not (step.skill_config.get("x") is not None and step.skill_config.get("y") is not None)
+                    ):
+                        # Find most recent completed SoM/Vision locate step with coordinates.
+                        for prev in reversed(task.steps):
+                            if prev.id == step.id:
+                                continue
+                            if prev.state not in (StepState.COMPLETED, StepState.SKIPPED):
+                                continue
+                            coords = None
+                            try:
+                                if isinstance(prev.output, dict):
+                                    coords = prev.output.get("coordinates")
+                                if coords is None and hasattr(prev.output, "coordinates"):
+                                    coords = getattr(prev.output, "coordinates")
+                            except Exception:
+                                coords = None
+                            if coords and isinstance(coords, (list, tuple)) and len(coords) == 2:
+                                step.skill_config["x"], step.skill_config["y"] = int(coords[0]), int(coords[1])
+                                break
+
                     input_model = skill.input_schema(**step.skill_config)
                     output = await skill.execute(input_model)
                     
-                    # Handle Output
-                    if output.model_dump().get("error"): # Helper check
-                        # Some skills return error in fields
+                    # Unified failure detection across skills (success/error/exit_code/stderr).
+                    failed = False
+                    err = None
+                    try:
+                        if getattr(output, "success", None) is False:
+                            failed = True
+                        if getattr(output, "exit_code", 0) not in (0, None):
+                            failed = True
                         if getattr(output, "error", None):
-                             print(f"Step failed: {output.error}")
-                             self.engine.update_step_state(task, step.id, StepState.FAILED, error=output.error)
-                        else:
-                             print(f"Step completed: {output}")
-                             self.engine.update_step_state(task, step.id, StepState.COMPLETED, output=str(output))
+                            failed = True
+                        if getattr(output, "stderr", None) and getattr(output, "exit_code", 0) not in (0, None):
+                            failed = True
+                        err = getattr(output, "error", None) or getattr(output, "stderr", None)
+                    except Exception:
+                        pass
+
+                    # Persist full output object where possible (dict) for replan context.
+                    out_payload = None
+                    try:
+                        out_payload = output.model_dump()
+                    except Exception:
+                        out_payload = str(output)
+
+                    if failed:
+                        print(f"Step failed: {err or output}")
+                        if trace:
+                            try:
+                                trace.write("step_failed", {"step_id": step.id, "skill": step.skill_name, "error": str(err or output)[:500]})
+                            except Exception:
+                                pass
+                        await self._handle_step_failure(task, step, str(err or output))
                     else:
                         print(f"Step completed: {str(output)}")
-                        self.engine.update_step_state(task, step.id, StepState.COMPLETED, output=str(output))
+                        self.engine.update_step_state(task, step.id, StepState.COMPLETED, output=out_payload)
+                        if trace:
+                            try:
+                                trace.write("step_done", {"step_id": step.id, "skill": step.skill_name})
+                            except Exception:
+                                pass
                         
                 except Exception as e:
                     print(f"Step execution exception: {e}")
-                    # self.engine.update_step_state(task, step.id, StepState.FAILED, error=str(e))
+                    if trace:
+                        try:
+                            trace.write("step_exception", {"step_id": step.id, "skill": step.skill_name, "error": str(e)[:500]})
+                        except Exception:
+                            pass
                     await self._handle_step_failure(task, step, str(e))
                 
                 await self.decision_log.add(f"Executed step {step.id}", metadata={"output": str(step.output)})
@@ -248,6 +351,8 @@ CRITICAL INSTRUCTION:
         2. For code edits: run verification command
         3. For persistent errors: replan with detailed context
         """
+        # Retries within self-correction (separate from task engine's max_retries counter).
+        # Keep this small to avoid loops.
         MAX_RETRIES = 2
         
         print(f"Step {step.id} failed with: {error}")
@@ -273,13 +378,19 @@ CRITICAL INSTRUCTION:
                     await self._handle_step_failure(task, step, output.error, retry_count + 1)
                 else:
                     print(f"Retry succeeded: {output}")
-                    self.engine.update_step_state(task, step.id, StepState.COMPLETED, output=str(output))
+                    try:
+                        self.engine.update_step_state(task, step.id, StepState.COMPLETED, output=output.model_dump())
+                    except Exception:
+                        self.engine.update_step_state(task, step.id, StepState.COMPLETED, output=str(output))
                 return
             except Exception as e:
                 await self._handle_step_failure(task, step, str(e), retry_count + 1)
                 return
         
         print("Initiating SELF-CORRECTION protocol...")
+        # Mark the step failed once (avoid inflating retry_count via recursion).
+        if step.state != StepState.FAILED:
+            self.engine.update_step_state(task, step.id, StepState.FAILED, error=error)
         
         # 1. Gather detailed history
         history = []
@@ -315,16 +426,19 @@ EXECUTION HISTORY:
             # Mark current step as replaced
             self.engine.update_step_state(task, step.id, StepState.SKIPPED, error=f"Replaced by recovery: {error}")
             
-            # Cancel remaining PENDING steps
+            # Skip remaining PENDING steps (plan changed)
             for s in task.steps:
                 if s.state == StepState.PENDING:
-                    self.engine.update_step_state(task, s.id, StepState.CANCELLED, error="Plan changed")
+                    self.engine.update_step_state(task, s.id, StepState.SKIPPED, error="Plan changed")
 
             # Add recovery steps
             for new_step in recovery_steps:
                 self.engine.add_step(task, new_step)
                 
             print("Plan updated. Resuming execution.")
+            # Ensure task remains running after plan mutation
+            task.state = TaskState.RUNNING
+            self.engine.save_task(task)
 
         except Exception as replan_err:
             print(f"Self-correction failed: {replan_err}")
@@ -353,7 +467,7 @@ EXECUTION HISTORY:
         try:
             from orbit_agent.skills.shell import ShellCommandSkill, ShellInput
             shell = ShellCommandSkill()
-            result = await shell.execute(ShellInput(cmd=command, cwd=project_path))
+            result = await shell.execute(ShellInput(command=command, cwd=project_path))
             
             if result.exit_code == 0:
                 return True, result.stdout

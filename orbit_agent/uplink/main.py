@@ -15,22 +15,53 @@ Prerequisites:
 import asyncio
 import os
 import sys
+import logging
 from pathlib import Path
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from dotenv import load_dotenv
-
-from orbit_agent.config.config import OrbitConfig
-from orbit_agent.uplink.telegram_bot import OrbitTelegramBot, UplinkConfig, TELEGRAM_AVAILABLE
+# Force UTF-8 for Windows Console as early as possible (before importing modules that may print).
+if sys.platform == "win32":
+    try:
+        # Important: use reconfigure (do NOT wrap streams), otherwise we can lose sys.stderr
+        # via double-wrapping/GC on Windows.
+        sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")  # type: ignore[attr-defined]
+        sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")  # type: ignore[attr-defined]
+    except Exception:
+        pass
 
 
 def main():
     """Main entry point for Orbit Uplink."""
+
+    from dotenv import load_dotenv
+
+    from orbit_agent.config.config import OrbitConfig
+    from orbit_agent.uplink.telegram_bot import OrbitTelegramBot, UplinkConfig, TELEGRAM_AVAILABLE
     
     # Load environment variables
     load_dotenv()
+
+    # Force UTF-8 for Windows Console (again, after env + imports)
+    if sys.platform == "win32":
+        # Some Windows consoles still choke on uncommon unicode (e.g. arrows).
+        # Use backslashreplace so logging/prints never crash the bot.
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")  # type: ignore[attr-defined]
+            sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+        # Some libraries create StreamHandlers early and capture the old cp1252 stream.
+        # Rebind any existing StreamHandlers to the now-sanitized stderr.
+        try:
+            root = logging.getLogger()
+            for h in list(root.handlers):
+                if isinstance(h, logging.StreamHandler):
+                    h.stream = sys.stderr
+        except Exception:
+            pass
     
     # Check dependencies
     if not TELEGRAM_AVAILABLE:
@@ -70,13 +101,16 @@ def main():
             print("⚠️ Invalid ORBIT_UPLINK_USERS format. Use comma-separated IDs.")
     
     # Create uplink config
+    screenshots_env = os.environ.get("ORBIT_UPLINK_SCREENSHOTS", "")
+    screenshot_on_task = str(screenshots_env).strip().lower() in {"1", "true", "yes", "on"}
     uplink_config = UplinkConfig(
         enabled=True,
         platform="telegram",
         bot_token=bot_token,
         allowed_users=allowed_users if allowed_users else None,
         require_auth=bool(allowed_users),  # Require auth only if users specified
-        screenshot_on_task=True
+        # Default OFF. Turn on via ORBIT_UPLINK_SCREENSHOTS=1 if you want proof screenshots.
+        screenshot_on_task=screenshot_on_task
     )
     
     # Security warning if no users configured

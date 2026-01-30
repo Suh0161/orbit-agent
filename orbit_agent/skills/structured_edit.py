@@ -1,12 +1,12 @@
 """
 Structured Edit Skill - Line-Based File Editing
 
-Implements the SWE-agent style structured editing with:
+Line-based file editing with:
 1. View file with line numbers
 2. Edit specific line ranges
 3. Validation before/after edits
 
-This is much more reliable than text-replacement because:
+This is usually more reliable than pure text replacement because:
 - LLMs can reference exact line numbers
 - No ambiguity about "which occurrence"
 - Easy to show context around the edit
@@ -51,10 +51,10 @@ class StructuredEditOutput(BaseModel):
 
 class StructuredEditSkill(BaseSkill):
     """
-    SWE-agent style structured file editing.
+    Structured file editing.
     
     Key features:
-    - View file with line numbers (crucial for LLM context)
+    - View file with line numbers
     - Edit specific line ranges (no ambiguity)
     - Insert/Delete at specific positions
     - Search with context

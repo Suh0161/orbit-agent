@@ -8,6 +8,7 @@ async def test_desktop_screenshot_mocked(tmp_path):
     
     # We must patch pyautogui to avoid actual screen capture in CI/Test env
     with patch("orbit_agent.skills.desktop.pyautogui") as mock_gui:
+        mock_gui.size.return_value = (1920, 1080)
         target = tmp_path / "screen.png"
         inp = DesktopInput(action="screenshot", save_path=str(target))
         
@@ -20,8 +21,9 @@ async def test_desktop_screenshot_mocked(tmp_path):
 async def test_desktop_type_mocked():
     skill = DesktopSkill()
     with patch("orbit_agent.skills.desktop.pyautogui") as mock_gui:
-        inp = DesktopInput(action="type", text="Hello World")
+        mock_gui.size.return_value = (1920, 1080)
+        inp = DesktopInput(action="type", text="Hello World", backend="pyautogui")
         output = await skill.execute(inp)
         
         assert output.success is True
-        mock_gui.write.assert_called_once_with("Hello World")
+        mock_gui.write.assert_called_once_with("Hello World", interval=0.05)
