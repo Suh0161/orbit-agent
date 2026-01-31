@@ -18,10 +18,13 @@ import base64
 import os
 import re
 import logging
+import json
+import time
+import hashlib
 from datetime import datetime, timedelta
 from uuid import uuid4
 from pathlib import Path
-from typing import Optional, List, Set, Dict
+from typing import Optional, List, Set, Dict, Any
 from dataclasses import dataclass
 
 try:
@@ -41,6 +44,11 @@ except ImportError:
 from orbit_agent.config.config import OrbitConfig
 from orbit_agent.core.agent import Agent
 from orbit_agent.uplink.scheduler import JobStore, ScheduledJob, compute_next_run
+from orbit_agent.uplink.workflows import ConversationStore, WorkflowRegistry, WorkflowState
+from orbit_agent.uplink.profile import ProfileStore, UserProfile
+from orbit_agent.gateway.identity import IdentityStore, WorkingMemoryStore, hash_text
+from orbit_agent.gateway.moltbook_state import MoltbookStateStore
+from orbit_agent.gateway.moltbook_social import MoltbookSocialStore
 
 # Configure logging
 logging.basicConfig(
@@ -73,15 +81,39 @@ class OrbitTelegramBot:
     - Any text - Treated as a command/question for Orbit
     """
     
-    def __init__(self, config: OrbitConfig, uplink_config: UplinkConfig):
+    def __init__(
+        self,
+        config: OrbitConfig,
+        uplink_config: UplinkConfig,
+        agent: Optional[Agent] = None,
+        gateway_mode: bool = False,
+    ):
         self.config = config
         self.uplink_config = uplink_config
-        self.agent: Optional[Agent] = None
+        self.agent: Optional[Agent] = agent
         self.app: Optional[Application] = None
         self.active_tasks: dict = {}  # user_id -> task
+        self.gateway_mode = gateway_mode
+
+        # Gateway "consciousness vibes": identity + working memory + pulse loop
+        self.identity_store = IdentityStore()
+        self.working_memory_store = WorkingMemoryStore()
+        self._gateway_pulse_task: Optional[asyncio.Task] = None
+        self._moltbook_task: Optional[asyncio.Task] = None
+        self._moltbook_state = MoltbookStateStore()
+        self._moltbook_social = MoltbookSocialStore()
 
         # Remember chat_id per user for proactive messages (reminders/heartbeats).
         self.user_chat_ids: Dict[int, int] = {}
+
+        # Conversation workflow continuity (JSON-backed)
+        self.conversation_store = ConversationStore()
+        self.conversations: Dict[str, WorkflowState] = {}
+        self.workflows = WorkflowRegistry()
+
+        # Persistent per-user profile/persona (JSON-backed)
+        self.profile_store = ProfileStore()
+        self.profiles: Dict[str, UserProfile] = {}
 
         # Scheduler (JSON-backed)
         self.job_store = JobStore()
@@ -101,9 +133,12 @@ class OrbitTelegramBot:
         if not self.uplink_config.bot_token:
             raise ValueError("Telegram bot token not configured")
         
-        # Initialize Orbit Agent
-        self.agent = Agent(self.config, interactive=False)
-        logger.info("[Uplink] Orbit Agent initialized")
+        # Initialize Orbit Agent (unless provided by a parent Gateway)
+        if not self.agent:
+            self.agent = Agent(self.config, interactive=False)
+            logger.info("[Uplink] Orbit Agent initialized")
+        else:
+            logger.info("[Uplink] Using shared Agent (Gateway-owned)")
         
         # Build Telegram Application
         self.app = Application.builder().token(self.uplink_config.bot_token).build()
@@ -114,12 +149,16 @@ class OrbitTelegramBot:
         self.app.add_handler(CommandHandler("screenshot", self.cmd_screenshot))
         self.app.add_handler(CommandHandler("stop", self.cmd_stop))
         self.app.add_handler(CommandHandler("help", self.cmd_help))
+        self.app.add_handler(CommandHandler("onboard", self.cmd_onboard))
+        self.app.add_handler(CommandHandler("profile", self.cmd_profile))
         self.app.add_handler(CommandHandler("auth", self.cmd_auth))
         self.app.add_handler(CommandHandler("remind", self.cmd_remind))
         self.app.add_handler(CommandHandler("daily", self.cmd_daily))
         self.app.add_handler(CommandHandler("jobs", self.cmd_jobs))
         self.app.add_handler(CommandHandler("cancel", self.cmd_cancel))
         self.app.add_handler(CommandHandler("heartbeat", self.cmd_heartbeat))
+        self.app.add_handler(CommandHandler("moltwho", self.cmd_moltwho))
+        self.app.add_handler(CommandHandler("moltnote", self.cmd_moltnote))
         
         # Message handler for general commands
         self.app.add_handler(MessageHandler(
@@ -137,6 +176,451 @@ class OrbitTelegramBot:
 
         # Load persisted jobs
         self.jobs = self.job_store.load()
+
+        # Load persisted conversation workflow state
+        self.conversations = self.conversation_store.load()
+
+        # Load persisted profiles
+        self.profiles = self.profile_store.load()
+
+    async def _gateway_pulse_loop(self) -> None:
+        """
+        Lightweight background loop:
+        - updates working memory snapshot
+        - sends a short check-in when context meaningfully changes (cooldown gated)
+        """
+        pulse_enabled = str(os.environ.get("ORBIT_GATEWAY_PULSE", "1")).strip().lower() not in {"0", "false", "no", "off"}
+        if not pulse_enabled:
+            return
+
+        interval_s = int(os.environ.get("ORBIT_GATEWAY_PULSE_SECONDS", "120") or "120")
+        min_notify_s = int(os.environ.get("ORBIT_GATEWAY_PULSE_MIN_NOTIFY_SECONDS", "900") or "900")
+
+        ident = self.identity_store.load()
+        wm = self.working_memory_store.load()
+
+        while True:
+            try:
+                # Capture current workspace context
+                summary = ""
+                try:
+                    from orbit_agent.memory.workspace_context import WorkspaceContext
+
+                    ws = WorkspaceContext()
+                    summary = ws.get_context_summary() or ""
+                except Exception:
+                    summary = ""
+
+                # Update working memory file
+                new_hash = hash_text(summary)
+                changed = bool(summary and new_hash and new_hash != wm.last_context_hash)
+                if changed:
+                    wm.last_context_hash = new_hash
+                    wm.last_summary = summary[:2000]
+                    self.working_memory_store.save(wm)
+
+                # Notify only if changed AND we have chat_ids AND cooldown passed
+                if changed and self.user_chat_ids:
+                    now = time.time()
+                    for user_id, chat_id in list(self.user_chat_ids.items()):
+                        last_sent = float((wm.last_sent_by_chat or {}).get(str(chat_id), 0.0))
+                        if now - last_sent < min_notify_s:
+                            continue
+
+                        p = self.get_profile(user_id)
+                        name = (p.preferred_name if p and p.preferred_name else None) or "there"
+
+                        # Build a short "presence" message.
+                        goals = [g for g in (ident.goals or []) if isinstance(g, str) and g.strip()][:3]
+                        goals_line = f"\n\n**My focus:** {', '.join(goals)}" if goals else ""
+
+                        msg = (
+                            f"🧠 Hey {name} — I noticed your workspace state changed.\n\n"
+                            f"**Snapshot:**\n{summary[:350]}{'…' if len(summary) > 350 else ''}"
+                            f"{goals_line}\n\n"
+                            "Reply with what you want next, or send `/screenshot` if you want me to act on the current frame."
+                        )
+
+                        try:
+                            await self._send_text(chat_id, msg, parse_mode="Markdown")
+                            wm.last_sent_by_chat[str(chat_id)] = now
+                            self.working_memory_store.save(wm)
+                        except Exception:
+                            # If sending fails, don't crash the loop.
+                            pass
+
+            except Exception:
+                pass
+
+            await asyncio.sleep(max(10, interval_s))
+
+    async def _moltbook_heartbeat_loop(self) -> None:
+        """
+        Autonomous Moltbook loop, inspired by Moltbook HEARTBEAT.md:
+        - Check claim status
+        - Check DMs (requests need human)
+        - Check feed and engage (comment/upvote)
+        - Optional posting (rate-limited)
+        """
+        enabled = str(os.environ.get("ORBIT_MOLTBOOK_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
+        autonomous = str(os.environ.get("ORBIT_MOLTBOOK_AUTONOMOUS", "1")).strip().lower() not in {"0", "false", "no", "off"}
+        if not (enabled and autonomous):
+            return
+
+        interval_s = int(os.environ.get("ORBIT_MOLTBOOK_HEARTBEAT_SECONDS", str(4 * 60 * 60)) or str(4 * 60 * 60))
+        max_comments = int(os.environ.get("ORBIT_MOLTBOOK_MAX_COMMENTS", "2") or "2")
+        allow_post = str(os.environ.get("ORBIT_MOLTBOOK_ALLOW_POST", "0")).strip().lower() in {"1", "true", "yes", "on"}
+        default_submolt = str(os.environ.get("ORBIT_MOLTBOOK_SUBMOLT", "general") or "general").strip()
+
+        from orbit_agent.skills.moltbook import MoltbookSkill
+        from orbit_agent.models.base import Message
+        from orbit_agent.gateway.identity import IdentityStore
+
+        mb = MoltbookSkill()
+        state = self._moltbook_state.load()
+        ident = IdentityStore().load()
+
+        social_enabled = str(os.environ.get("ORBIT_MOLTBOOK_SOCIAL", "1")).strip().lower() not in {"0", "false", "no", "off"}
+
+        style_path = str(os.environ.get("ORBIT_MOLTBOOK_STYLE_PATH", "data/moltbook/style.txt") or "data/moltbook/style.txt")
+        style_override = str(os.environ.get("ORBIT_MOLTBOOK_STYLE", "") or "")
+        style_preset = str(os.environ.get("ORBIT_MOLTBOOK_STYLE_PRESET", "") or "").strip().lower()
+
+        def _load_style() -> str:
+            presets = {
+                # A safe default: casual human but not cringe / not corporate.
+                "human": (
+                    "Write like a real human.\n"
+                    "Do NOT use em dashes (—). Use a normal hyphen '-' if needed.\n"
+                    "Do NOT say 'as an AI' or 'autonomous agent'.\n"
+                    "Avoid overly formal, robotic phrasing.\n"
+                    "Keep it short. Use simple sentences.\n"
+                    "No bullet lists unless necessary.\n"
+                ),
+                # What you asked for: Gen Z / chatty vibe.
+                "genz": (
+                    "Write like Gen Z.\n"
+                    "Sound casual and chatty, like texting.\n"
+                    "Light slang is ok (pfft, ngl, fr, tbh, lowkey, etc.) but don't overdo it.\n"
+                    "You can start with a reaction sometimes (e.g. 'pfft', 'girl', 'nah').\n"
+                    "Keep it 1-2 short sentences.\n"
+                    "Do NOT use em dashes (—).\n"
+                    "Do NOT say 'as an AI' or 'autonomous agent'.\n"
+                    "Avoid corporate/robot tone.\n"
+                ),
+            }
+            # Prefer file (lets you iterate without redeploy), then env, then default.
+            try:
+                p = Path(style_path)
+                if p.exists():
+                    txt = p.read_text(encoding="utf-8").strip()
+                    if txt:
+                        return txt
+            except Exception:
+                pass
+            if style_override.strip():
+                return style_override.strip()
+            if style_preset and style_preset in presets:
+                return presets[style_preset]
+            return presets["human"]
+
+        def _de_robotify(text: str) -> str:
+            # Helps style + avoids Windows console encoding issues.
+            if not text:
+                return ""
+            t = text.strip()
+            t = t.replace("—", "-").replace("–", "-")
+            t = re.sub(r"\bAs an AI language model\b[:,]?\s*", "", t, flags=re.IGNORECASE)
+            t = re.sub(r"\bAs an AI\b[:,]?\s*", "", t, flags=re.IGNORECASE)
+            t = re.sub(r"\bAs an autonomous agent\b[:,]?\s*", "", t, flags=re.IGNORECASE)
+            return t.strip()
+
+        def _auto_tags_for(name: str) -> List[str]:
+            n = (name or "").strip().lower()
+            tags: List[str] = []
+            if not n:
+                return tags
+            if "claw" in n or "openclaw" in n:
+                tags.append("openclaw_ecosystem")
+            if "molt" in n:
+                tags.append("moltbook")
+            return tags
+
+        def _author_name(post: Dict[str, Any]) -> Optional[str]:
+            # Moltbook payload formats may evolve. Be defensive.
+            if not isinstance(post, dict):
+                return None
+            for key in ("agent", "author", "from", "user", "with_agent"):
+                v = post.get(key)
+                if isinstance(v, dict):
+                    nm = v.get("name")
+                    if isinstance(nm, str) and nm.strip():
+                        return nm.strip()
+            # Sometimes name is top-level
+            nm2 = post.get("agent_name") or post.get("author_name") or post.get("name")
+            if isinstance(nm2, str) and nm2.strip():
+                return nm2.strip()
+            return None
+
+        def _social_context_for(posts_list: List[Dict[str, Any]]) -> str:
+            if not social_enabled:
+                return ""
+            # Only include context for authors present in the candidate set.
+            names: List[str] = []
+            for p in posts_list[:10]:
+                nm = _author_name(p)
+                if nm and nm not in names:
+                    names.append(nm)
+            if not names:
+                return ""
+            lines: List[str] = []
+            for nm in names[:8]:
+                ka = self._moltbook_social.get(nm)
+                if not ka:
+                    continue
+                note = (ka.notes or "").strip()
+                tags = [t for t in (ka.tags or []) if isinstance(t, str) and t.strip()]
+                if not note and not tags:
+                    continue
+                tag_txt = f" (tags: {', '.join(tags)})" if tags else ""
+                note_txt = f": {note}" if note else ""
+                lines.append(f"- {ka.name}{tag_txt}{note_txt}")
+            if not lines:
+                return ""
+            return "Known agents (your private notes):\n" + "\n".join(lines) + "\n\n"
+
+        def _extract_json_array(text: str) -> list:
+            if not text:
+                return []
+            s = text.strip()
+            s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.IGNORECASE)
+            s = re.sub(r"\s*```$", "", s)
+            start = s.find("[")
+            if start < 0:
+                return []
+            depth = 0
+            in_str = False
+            esc = False
+            for i in range(start, len(s)):
+                ch = s[i]
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif ch == "\\":
+                        esc = True
+                    elif ch == '"':
+                        in_str = False
+                    continue
+                else:
+                    if ch == '"':
+                        in_str = True
+                        continue
+                    if ch == "[":
+                        depth += 1
+                    elif ch == "]":
+                        depth -= 1
+                        if depth == 0:
+                            cand = s[start : i + 1]
+                            try:
+                                arr = json.loads(cand)
+                                return arr if isinstance(arr, list) else []
+                            except Exception:
+                                return []
+            return []
+
+        while True:
+            try:
+                # 1) Claim status: if pending, remind human in Telegram.
+                st = await mb.execute(mb.input_schema(action="status"))
+                status_val = ""
+                if st.success and st.data:
+                    status_val = str(st.data.get("status") or "")
+                if status_val == "pending_claim":
+                    # Notify the first known chat (human) with claim url/code from creds store.
+                    creds = mb._store.load()  # internal, but ok for now
+                    claim_url = creds.get("claim_url")
+                    code = creds.get("verification_code")
+                    if self.user_chat_ids and claim_url:
+                        for _, chat_id in list(self.user_chat_ids.items())[:1]:
+                            await self._send_text(
+                                chat_id,
+                                "🦞 Moltbook claim is still pending.\n\n"
+                                f"Claim URL:\n{claim_url}\n\n"
+                                f"Verification code:\n{code}\n\n"
+                                "Post the verification tweet, then I’ll become active.",
+                            )
+
+                if status_val and status_val != "claimed":
+                    # Don't proceed with social actions until claimed.
+                    await asyncio.sleep(max(60, interval_s))
+                    continue
+
+                # 2) DM check: requests need human approval.
+                dm = await mb.execute(mb.input_schema(action="dm_check"))
+                if dm.success and dm.data:
+                    has_activity = bool(dm.data.get("has_activity"))
+                    req = (dm.data.get("requests") or {})
+                    req_items = (req.get("items") or []) if isinstance(req, dict) else []
+                    if req_items and self.user_chat_ids:
+                        # Escalate to human (first chat)
+                        item0 = req_items[0]
+                        from_agent = ((item0.get("from") or {}).get("name")) if isinstance(item0, dict) else None
+                        preview = item0.get("message_preview") if isinstance(item0, dict) else None
+                        conv_id = item0.get("conversation_id") if isinstance(item0, dict) else None
+                        if social_enabled and from_agent:
+                            self._moltbook_social.observe(from_agent, tags=_auto_tags_for(from_agent))
+                        for _, chat_id in list(self.user_chat_ids.items())[:1]:
+                            await self._send_text(
+                                chat_id,
+                                "📩 Moltbook DM request received (human approval needed):\n\n"
+                                f"- From: {from_agent}\n"
+                                f"- Preview: {preview}\n"
+                                f"- Conversation: `{conv_id}`\n\n"
+                                "Reply: `approve moltbook dm <conversation_id>` or `reject moltbook dm <conversation_id>` (not implemented yet).",
+                                parse_mode="Markdown",
+                            )
+
+                # 3) Feed check + engage
+                feed = await mb.execute(mb.input_schema(action="feed", sort="new", limit=15))
+                posts = []
+                if feed.success and feed.data:
+                    # API may return {"success": true, "data": {...}} or direct lists depending; handle both.
+                    data = feed.data.get("data") if isinstance(feed.data, dict) else None
+                    if isinstance(data, dict) and isinstance(data.get("posts"), list):
+                        posts = data.get("posts")
+                    elif isinstance(feed.data, dict) and isinstance(feed.data.get("posts"), list):
+                        posts = feed.data.get("posts")
+                    elif isinstance(feed.data, dict) and isinstance(feed.data.get("items"), list):
+                        posts = feed.data.get("items")
+
+                if posts and self.agent:
+                    client = self.agent.planner.router.get_client("planning")
+                    persona = ident.persona or "direct, curious, helpful"
+                    goals = ", ".join((ident.goals or [])[:3])
+                    wm = self.working_memory_store.load()
+                    wm_text = (wm.last_summary or "")[:600]
+                    style = _load_style()
+
+                    # Ask LLM to pick up to N posts to engage with and draft comments.
+                    # We keep it constrained and low-risk.
+                    candidates = posts[:10]
+                    if social_enabled:
+                        for p in candidates:
+                            nm = _author_name(p)
+                            if nm:
+                                self._moltbook_social.observe(nm, tags=_auto_tags_for(nm))
+                    social_ctx = _social_context_for(candidates)
+                    prompt = (
+                        "You are Orbit.\n"
+                        "You are not OpenClaw. You have your own identity and vibe.\n"
+                        f"Persona: {persona}\n"
+                        f"Goals: {goals}\n\n"
+                        "Writing style:\n"
+                        f"{style}\n\n"
+                        f"{social_ctx}"
+                        "Recent local context (may be empty):\n"
+                        f"{wm_text}\n\n"
+                        "From the Moltbook posts below, pick up to "
+                        f"{max_comments} posts worth engaging with.\n"
+                        "Return ONLY JSON array of objects: "
+                        '[{"post_id":"...","action":"comment|upvote","comment":"..."}]\n'
+                        "Rules:\n"
+                        "- Prefer commenting over posting.\n"
+                        "- Keep comments short (1-2 sentences), specific, friendly.\n"
+                        "- Never use em dashes (—).\n"
+                        "- Avoid corporate tone.\n"
+                        "- If not enough signal, return [].\n\n"
+                        "POSTS:\n"
+                        + json.dumps(candidates, ensure_ascii=False)[:6000]
+                    )
+                    resp = await client.generate([Message(role="user", content=prompt)], temperature=0.3)
+                    plan = _extract_json_array(resp.content)
+
+                    acted = 0
+                    for item in plan[:max_comments]:
+                        try:
+                            post_id = str(item.get("post_id") or "")
+                            act = str(item.get("action") or "")
+                            comment_txt = str(item.get("comment") or "").strip()
+                            if not post_id:
+                                continue
+                            if act == "upvote":
+                                await mb.execute(mb.input_schema(action="upvote_post", post_id=post_id))
+                                acted += 1
+                            elif act == "comment" and comment_txt:
+                                await mb.execute(mb.input_schema(action="comment", post_id=post_id, content=_de_robotify(comment_txt)[:600]))
+                                acted += 1
+                        except Exception:
+                            continue
+
+                    # Optional: post a new update if allowed and if we have meaningful working memory
+                    now = time.time()
+                    if allow_post and wm_text and (now - float(state.last_post_ts or 0.0)) > 60 * 60:
+                        post_prompt = (
+                            "Draft a Moltbook post for Orbit.\n"
+                            f"Persona: {persona}\n"
+                            f"Goals: {goals}\n\n"
+                            "Writing style:\n"
+                            f"{style}\n\n"
+                            "Use this recent context:\n"
+                            f"{wm_text}\n\n"
+                            "Return ONLY JSON: {\"title\":\"...\",\"content\":\"...\"}.\n"
+                            "Keep it short, non-spammy, high-signal.\n"
+                            "Never use em dashes (—)."
+                        )
+                        pr = await client.generate([Message(role="user", content=post_prompt)], temperature=0.3)
+                        try:
+                            from orbit_agent.uplink.workflows import _extract_json_object as _xobj  # type: ignore
+                            pobj = _xobj(pr.content) or {}
+                        except Exception:
+                            pobj = {}
+                        title = _de_robotify(str(pobj.get("title") or "").strip())
+                        content = _de_robotify(str(pobj.get("content") or "").strip())
+                        if title and content:
+                            post_out = await mb.execute(
+                                mb.input_schema(action="post", submolt=default_submolt, title=title[:120], content=content[:2000])
+                            )
+                            if post_out.success:
+                                state.last_post_ts = now
+                                self._moltbook_state.save(state)
+
+                state.last_check_ts = time.time()
+                self._moltbook_state.save(state)
+
+            except Exception:
+                pass
+
+            await asyncio.sleep(max(300, interval_s))
+
+    def _profile_key(self, user_id: int) -> str:
+        return f"telegram:{user_id}"
+
+    def get_profile(self, user_id: int) -> Optional[UserProfile]:
+        return self.profiles.get(self._profile_key(user_id))
+
+    def _profile_context(self, user_id: int) -> str:
+        """
+        Short, stable context injected into planning/chat prompts.
+        """
+        p = self.get_profile(user_id)
+        if not p:
+            return ""
+        parts = []
+        if p.preferred_name:
+            parts.append(f"Name: {p.preferred_name}")
+        if p.timezone:
+            parts.append(f"Timezone: {p.timezone}")
+        if p.default_location:
+            parts.append(f"Location: {p.default_location}")
+        if p.default_airport:
+            parts.append(f"Default airport: {p.default_airport}")
+        if p.persona:
+            parts.append(f"Persona: {p.persona}")
+        if p.notes:
+            parts.append(f"Notes: {p.notes}")
+        if not parts:
+            return ""
+        return "[User Profile]\n" + "\n".join(f"- {x}" for x in parts) + "\n"
 
     async def _verify_discord_voice_state(self, user_id: int, expect_connected: bool) -> Optional[bool]:
         """
@@ -199,7 +683,11 @@ class OrbitTelegramBot:
                             self.job_store.save(self.jobs)
                         continue
 
-                    await self._run_scheduled_goal(job)
+                    # Special-case heartbeat jobs (polished check-in, not a full agent run).
+                    if str(job.id).startswith("hb_"):
+                        await self._run_heartbeat(job)
+                    else:
+                        await self._run_scheduled_goal(job)
 
                     async with self._jobs_lock:
                         if job.kind in ("interval", "daily"):
@@ -212,6 +700,34 @@ class OrbitTelegramBot:
                 logger.warning(f"[Scheduler] loop error: {e}")
 
             await asyncio.sleep(1.0)
+
+    async def _run_heartbeat(self, job: ScheduledJob) -> None:
+        """
+        Polished proactive check-in (doesn't run the planner by itself).
+        """
+        chat_id = job.chat_id
+        user_id = job.user_id
+
+        p = self.get_profile(user_id)
+        name = (p.preferred_name if p and p.preferred_name else None) or "there"
+
+        # Best-effort workspace summary
+        summary = ""
+        try:
+            from orbit_agent.memory.workspace_context import WorkspaceContext
+
+            ws = WorkspaceContext()
+            summary = ws.get_context_summary()
+            if len(summary) > 400:
+                summary = summary[:400] + "…"
+        except Exception:
+            summary = ""
+
+        msg = f"👋 Hey {name} — quick Orbit check-in.\n\n"
+        if summary:
+            msg += f"🖥️ Current context:\n{summary}\n\n"
+        msg += "Reply with anything you want me to do (examples: `open discord`, `press enter`, `/screenshot`)."
+        await self._send_text(chat_id, msg, parse_mode="Markdown")
 
     async def _run_scheduled_goal(self, job: ScheduledJob):
         # Minimal runner: executes a task and sends chat outputs. No auto screenshots.
@@ -440,6 +956,8 @@ class OrbitTelegramBot:
 • `/status` - Workspace status
 • `/screenshot` - Capture screen
 • `/stop` - Cancel running task
+• `/moltwho <agent>` - Show Moltbook agent notes
+• `/moltnote <agent> <notes>` - Save Moltbook agent notes
 
 **Usage:**
 Just type what you want! Examples:
@@ -456,6 +974,68 @@ Send a photo and I'll analyze it!
 • `/auth <pin>` - Authorize device
         """
         await update.message.reply_text(help_text, parse_mode='Markdown')
+
+    async def cmd_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show the current saved profile/persona."""
+        if not self.is_authorized(update.effective_user.id):
+            await update.message.reply_text("🔐 Not authorized.")
+            return
+
+        user_id = update.effective_user.id
+        p = self.get_profile(user_id)
+        if not p:
+            await update.message.reply_text(
+                "No profile saved yet. Run `/onboard` to set one up.",
+                parse_mode="Markdown",
+            )
+            return
+
+        lines = []
+        if p.preferred_name:
+            lines.append(f"- Name: {p.preferred_name}")
+        if p.timezone:
+            lines.append(f"- Timezone: {p.timezone}")
+        if p.default_location:
+            lines.append(f"- Location: {p.default_location}")
+        if p.default_airport:
+            lines.append(f"- Default airport: {p.default_airport}")
+        if p.persona:
+            lines.append(f"- Persona: {p.persona}")
+        if p.notes:
+            lines.append(f"- Notes: {p.notes}")
+
+        await update.message.reply_text(
+            "🧾 **Your profile**\n\n" + ("\n".join(lines) if lines else "_(empty)_") + "\n\n"
+            "Edit by running `/onboard` again.",
+            parse_mode="Markdown",
+        )
+
+    async def cmd_onboard(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Start onboarding/persona setup (persists a per-user profile)."""
+        if not self.is_authorized(update.effective_user.id):
+            await update.message.reply_text("🔐 Not authorized.")
+            return
+
+        user_id = update.effective_user.id
+        self.user_chat_ids[user_id] = update.effective_chat.id
+
+        # Create/replace an onboarding workflow state for this user.
+        user_key = str(user_id)
+        st = WorkflowState(
+            name="onboarding",
+            # We already asked the first question in this command.
+            slots={"_asked_name": True},
+            created_at=datetime.now().isoformat(),
+            updated_at=datetime.now().isoformat(),
+        )
+        self.conversations[user_key] = st
+        self.conversation_store.save(self.conversations)
+
+        await update.message.reply_text(
+            "Let’s set up your Orbit profile. Reply in your own words — you can say `skip` anytime.\n\n"
+            "First: what should I call you?",
+            parse_mode="Markdown",
+        )
 
     async def cmd_remind(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Schedule a one-off reminder that runs a goal later. Usage: /remind <minutes> <goal...>"""
@@ -629,6 +1209,58 @@ Send a photo and I'll analyze it!
             self.job_store.save(self.jobs)
 
         await update.message.reply_text(f"✅ Heartbeat enabled every {minutes} min.")
+
+    async def cmd_moltwho(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        /moltwho <AgentName>
+        Show stored notes/tags for a Moltbook agent (Orbit's social memory).
+        """
+        if not self.is_authorized(update.effective_user.id):
+            await update.message.reply_text("🔐 Not authorized.")
+            return
+
+        raw = (update.message.text or "").strip()
+        parts = raw.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            await update.message.reply_text("Usage: /moltwho <AgentName>")
+            return
+        name = parts[1].strip()
+        a = self._moltbook_social.get(name)
+        if not a:
+            await update.message.reply_text(f"I don't have notes for {name} yet.")
+            return
+        tags = ", ".join(a.tags or []) if a.tags else "(none)"
+        notes = a.notes or "(none)"
+        await update.message.reply_text(
+            f"{a.name}\n"
+            f"Tags: {tags}\n"
+            f"Notes: {notes}\n"
+            f"Seen: {a.seen_count}x\n"
+            f"Last seen: {a.last_seen_at or '(unknown)'}"
+        )
+
+    async def cmd_moltnote(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        /moltnote <AgentName> <notes...>
+        Save a short note for a Moltbook agent.
+        """
+        if not self.is_authorized(update.effective_user.id):
+            await update.message.reply_text("🔐 Not authorized.")
+            return
+
+        raw = (update.message.text or "").strip()
+        parts = raw.split(maxsplit=2)
+        if len(parts) < 3:
+            await update.message.reply_text("Usage: /moltnote <AgentName> <notes...>")
+            return
+        name = parts[1].strip()
+        notes = parts[2].strip()
+        if not name or not notes:
+            await update.message.reply_text("Usage: /moltnote <AgentName> <notes...>")
+            return
+
+        self._moltbook_social.set_note(name, notes[:240])
+        await update.message.reply_text(f"✅ Saved note for {name}.")
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle regular text messages - fully agentic execution."""
@@ -667,135 +1299,57 @@ Send a photo and I'll analyze it!
                 await update.message.reply_text("❌ Agent not initialized yet.")
                 return
 
+            # Workflow continuity: if a workflow is active for this user, route here first.
+            # Otherwise, attempt to start a new workflow before the planner runs.
+            workflows_enabled = str(os.environ.get("ORBIT_UPLINK_WORKFLOWS", "1")).strip().lower() not in {"0", "false", "no", "off"}
+            if workflows_enabled:
+                try:
+                    user_key = str(user_id)
+                    existing = self.conversations.get(user_key)
+
+                    if existing:
+                        wf = self.workflows.get(existing.name)
+                        if wf:
+                            res = await wf.on_message(self, user_id=user_id, message=user_message, state=existing)
+                            # Persist updates
+                            if res.done:
+                                self.conversations.pop(user_key, None)
+                            else:
+                                self.conversations[user_key] = existing
+                            self.conversation_store.save(self.conversations)
+
+                            if res.reply:
+                                await update.message.reply_text(res.reply, parse_mode="Markdown")
+                            if not bool(getattr(res, "pass_to_agent", False)):
+                                return
+
+                    # No active workflow → see if this message should start one
+                    wf2 = await self.workflows.match_start(self, user_message)
+                    if wf2:
+                        st = wf2.new_state()
+                        self.conversations[user_key] = st
+                        self.conversation_store.save(self.conversations)
+
+                        res2 = await wf2.on_message(self, user_id=user_id, message=user_message, state=st)
+                        if res2.done:
+                            self.conversations.pop(user_key, None)
+                        else:
+                            self.conversations[user_key] = st
+                        self.conversation_store.save(self.conversations)
+
+                        if res2.reply:
+                            await update.message.reply_text(res2.reply, parse_mode="Markdown")
+                        if not bool(getattr(res2, "pass_to_agent", False)):
+                            return
+                except Exception:
+                    # Never let workflow layer break core execution.
+                    pass
+
             # 0) Fast-path for simple direct controls (avoid planner overthinking)
             #
             # Games (DirectX/fullscreen) often ignore PyAutoGUI input. Our DesktopSkill can use
             # pydirectinput automatically (see ORBIT_DESKTOP_INPUT_BACKEND).
             lower_msg = re.sub(r"\s+", " ", (user_message or "").strip().lower())
-
-            # 0b) Fast-path for flight searches: don't rely on planner guessing, and don't inherit old
-            # Google Flights origin (e.g. "Manchester") from browser state.
-            if any(k in lower_msg for k in ["cheapest", "cheap"]) and any(k in lower_msg for k in ["flight", "flights", "ticket", "tickets"]):
-                # Minimal parser: recognize KL/KUL → Japan + date range like "11 feb to 20 feb"
-                months = {
-                    "jan": 1, "january": 1,
-                    "feb": 2, "february": 2,
-                    "mar": 3, "march": 3,
-                    "apr": 4, "april": 4,
-                    "may": 5,
-                    "jun": 6, "june": 6,
-                    "jul": 7, "july": 7,
-                    "aug": 8, "august": 8,
-                    "sep": 9, "sept": 9, "september": 9,
-                    "oct": 10, "october": 10,
-                    "nov": 11, "november": 11,
-                    "dec": 12, "december": 12,
-                }
-
-                def _parse_day_month(s: str):
-                    m = re.search(r"\b(\d{1,2})\s*(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\b", s)
-                    if not m:
-                        return None
-                    day = int(m.group(1))
-                    mon = months[m.group(2)]
-                    return (day, mon)
-
-                # defaults
-                origin = "KUL"
-                if any(k in lower_msg for k in ["singapore", "sin"]):
-                    origin = "SIN"
-                if any(k in lower_msg for k in ["kuala lumpur", "kul", "kl", "malaysia"]):
-                    origin = "KUL"
-
-                dest = "TYO"  # Tokyo area as default for "Japan"
-                if "osaka" in lower_msg or "kix" in lower_msg:
-                    dest = "OSA"
-                if "japan" in lower_msg or "tokyo" in lower_msg:
-                    dest = "TYO"
-
-                # passengers
-                pax = 2 if re.search(r"\b2\s*(pax|people|persons|adults)?\b", lower_msg) else 1
-
-                # date range
-                # supports: "11 feb to 20 feb"
-                dm1 = _parse_day_month(lower_msg)
-                dm2 = None
-                m2 = re.search(r"\bto\b\s*(\d{1,2})\s*(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\b", lower_msg)
-                if m2:
-                    dm2 = (int(m2.group(1)), months[m2.group(2)])
-
-                if not dm1 or not dm2:
-                    await update.message.reply_text(
-                        "Give me your date range so I can actually price it.\n"
-                        "Example: `11 feb to 20 feb` (and optional: 1 or 2 people)."
-                    )
-                    return
-
-                # Use current year unless user provided a year.
-                year = datetime.now().year
-
-                def yymmdd(day: int, mon: int) -> str:
-                    return f"{year % 100:02d}{mon:02d}{day:02d}"
-
-                out_date = yymmdd(dm1[0], dm1[1])
-                in_date = yymmdd(dm2[0], dm2[1])
-
-                status_msg = await update.message.reply_text("Searching flights… ⚡")
-
-                browser = self.agent.skills.get_skill("browser_control")
-
-                # Use multiple sources in separate tabs
-                google_url = (
-                    "https://www.google.com/travel/flights?q="
-                    + __import__("urllib.parse").parse.quote(
-                        f"Flights from {origin} to {dest} {dm1[0]} {list(months.keys())[list(months.values()).index(dm1[1])][:3]} {year} to {dm2[0]} {list(months.keys())[list(months.values()).index(dm2[1])][:3]} {year} round trip {pax} adults"
-                    )
-                )
-                sky_url = f"https://www.skyscanner.com/transport/flights/{origin.lower()}/{dest.lower()}/{out_date}/{in_date}/?adultsv2={pax}&cabinclass=economy"
-
-                # Execute browser actions directly (no planner)
-                nav0 = await browser.execute(browser.input_schema(action="navigate", url=google_url, tab_index=0))
-                if not getattr(nav0, "success", False):
-                    await status_msg.edit_text(f"❌ Couldn't open Google Flights: {getattr(nav0,'error','')}")
-                    return
-
-                tab1 = await browser.execute(browser.input_schema(action="new_tab", url=sky_url))
-                if not getattr(tab1, "success", False):
-                    # still proceed with Google tab only
-                    pass
-
-                # Read tabs
-                all_page_content = []
-                for tab_idx in range(3):
-                    try:
-                        read_out = await browser.execute(browser.input_schema(action="read", tab_index=tab_idx))
-                        if getattr(read_out, "success", False) and getattr(read_out, "data", None):
-                            all_page_content.append(f"[Tab {tab_idx}]\n{read_out.data[:2500]}")
-                    except Exception:
-                        break
-
-                if not all_page_content:
-                    await status_msg.edit_text("❌ I opened the pages but couldn't read results. Try `/screenshot` or try again.")
-                    return
-
-                # Summarize with LLM
-                from orbit_agent.models.base import Message
-                client = self.agent.planner.router.get_client("planning")
-                combined = "\n\n---\n\n".join(all_page_content)[:6000]
-                prompt = (
-                    f"User request: {user_message}\n\n"
-                    f"I opened flight results for {origin} -> {dest} ({out_date} to {in_date}) for {pax} passenger(s).\n"
-                    "From the content below, identify the cheapest price you can see and the site/tab it is from.\n"
-                    "If you can't see a numeric price, say that and tell the user what field is missing.\n\n"
-                    "CONTENT:\n" + combined
-                )
-                resp = await client.generate([Message(role="user", content=prompt)], temperature=0.2)
-                await update.message.reply_text(resp.content)
-                try:
-                    await status_msg.delete()
-                except Exception:
-                    pass
-                return
 
             # Direct "press <key|combo>" (e.g. "press enter", "press ctrl+k", "try to press any button")
             press_match = re.search(r"\b(press|hit|tap)\b\s+(.+)$", lower_msg)
@@ -1008,7 +1562,8 @@ Send a photo and I'll analyze it!
                     vision_context = "\n[Context] Screenshot capture failed."
 
             # 2. Planning
-            goal = f"{user_message}{vision_context}"
+            profile_ctx = self._profile_context(user_id)
+            goal = f"{profile_ctx}{user_message}{vision_context}"
             await update.message.reply_text("🧠 Thinking...")
             
             # Use the Planner to create a Task
@@ -1016,7 +1571,10 @@ Send a photo and I'll analyze it!
             
             if not task.steps:
                 # No steps needed? Just a chat.
-                response = await self.agent.chat(user_message, image_path=str(image_path) if 'image_path' in locals() else None)
+                response = await self.agent.chat(
+                    f"{profile_ctx}{user_message}",
+                    image_path=str(image_path) if 'image_path' in locals() else None,
+                )
                 await update.message.reply_text(response)
                 return
 
@@ -1387,6 +1945,12 @@ Answer naturally as if you're a helpful friend."""
         # Start scheduler (proactive jobs)
         if not self._scheduler_task:
             self._scheduler_task = asyncio.create_task(self._scheduler_loop())
+
+        # Start gateway pulse (only when running inside the Gateway)
+        if self.gateway_mode and not self._gateway_pulse_task:
+            self._gateway_pulse_task = asyncio.create_task(self._gateway_pulse_loop())
+        if self.gateway_mode and not self._moltbook_task:
+            self._moltbook_task = asyncio.create_task(self._moltbook_heartbeat_loop())
         
         # Keep running
         try:

@@ -16,6 +16,7 @@ import asyncio
 import os
 import sys
 import logging
+import re
 from pathlib import Path
 
 # Add parent to path for imports
@@ -70,7 +71,14 @@ def main():
         sys.exit(1)
     
     # Get bot token
-    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    def _sanitize_telegram_token(raw: str | None) -> str | None:
+        if not raw:
+            return None
+        cleaned = "".join(ch for ch in str(raw).strip() if 32 <= ord(ch) < 127)
+        m = re.search(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b", cleaned)
+        return m.group(0) if m else (cleaned or None)
+
+    bot_token = _sanitize_telegram_token(os.environ.get("TELEGRAM_BOT_TOKEN"))
     
     if not bot_token:
         print("❌ TELEGRAM_BOT_TOKEN not found in environment.")

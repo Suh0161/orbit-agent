@@ -7,13 +7,13 @@ aiofiles>=23.0.0
 colorama>=0.4.6
 
 # Desktop Automation & Vision
-PyQt6>=6.6.0
-qasync>=0.27.1
 mss>=9.0.1
 Pillow>=10.0.0
 opencv-python>=4.8.0
 numpy>=1.26.0
 pydirectinput
+playwright>=1.40.0
+httpx>=0.27.0
 
 # System & Memory
 psutil>=5.9.0

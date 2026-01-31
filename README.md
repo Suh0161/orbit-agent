@@ -2,7 +2,7 @@
 
 **Autonomous Desktop Intelligence.**
 
-Orbit is a local-first AI agent designed to operate your computer with the same dexterity and reasoning as a human user. It integrates Vision (GPT-5.1), Planning, and precise Tooling to execute complex workflows—from coding entire applications to rapid web research—while keeping you in the loop.
+Orbit is a local-first AI agent designed to operate your computer with the same dexterity and reasoning as a human user. It integrates Vision (GPT-5.1), Planning, and precise Tooling to execute complex workflows—from coding entire applications to rapid web research—while keeping you in the loop (Telegram-first + CLI).
 
 > "A Junior Engineer with Senior Guardrails."
 
@@ -36,7 +36,42 @@ Unlike simple chatbots, Orbit has hands.
 
 ## Installation
 
-**Prerequisites:** Python 3.10+
+**Prerequisites:** Python 3.11+
+
+### One-liner install (like OpenClaw)
+
+**Windows (PowerShell):**
+
+```powershell
+# Safer: download first, inspect, then run
+iwr -useb https://raw.githubusercontent.com/Start-Orbit/orbit/main/install.ps1 -OutFile .\install-orbit.ps1
+.\install-orbit.ps1
+
+# Optional: custom ASCII banner
+# .\install-orbit.ps1 -BannerPath .\my-banner.txt
+# Optional: disable banner
+# .\install-orbit.ps1 -NoBanner
+
+# Optional: skip the confirmation prompt
+# .\install-orbit.ps1 -Yes
+```
+
+**macOS/Linux:**
+
+```bash
+# Safer: download first, inspect, then run
+curl -fsSL https://raw.githubusercontent.com/Start-Orbit/orbit/main/install.sh -o install-orbit.sh
+chmod +x install-orbit.sh
+./install-orbit.sh
+
+# Optional: custom ASCII banner
+# ORBIT_BANNER_PATH=./my-banner.txt ./install-orbit.sh
+# Optional: disable banner
+# ORBIT_NO_BANNER=1 ./install-orbit.sh
+
+# Optional: skip the confirmation prompt
+# ORBIT_YES=1 ./install-orbit.sh
+```
 
 ```bash
 # 1. Clone
@@ -57,44 +92,36 @@ cp .env.example .env
 
 ## Usage
 
-### 1. The Desktop Companion (GUI)
-The primary interface. A sleek, unobtrusive "Glass Card" widget.
-
-```bash
-python -m orbit_agent.gui.main
-```
-
--   **Chat:** "Who are you?"
--   **Tasks:** "Create a Snake Game in Python." (Triggers Architect Protocol)
--   **Vision:** Click the visible Eye Icon to analyze your screen.
--   **Control:** "Open Notepad and type 'Hello World'."
--   **Self-Check:** "Close yourself."
-
-### 2. The Ghost Shell (CLI)
+### 1. The Ghost Shell (CLI)
 Low-latency command line interface.
 
 ```bash
-python -m orbit_agent.cli.main chat
+orbit chat
 ```
 
-### 3. Orbit Uplink (Mobile Access)
+### 2. Orbit Uplink (Mobile Access)
 Control your desktop from your phone via Telegram.
 
 ```bash
-# 1. Ensure Dependencies are installed
-pip install -r requirements.txt
-
-# 2. Configure Telegram Bot
+# 1. Configure Telegram Bot
 # - Message @BotFather on Telegram to create a bot
 # - Get your token
 
-# 3. Update Configuration
+# 2. Update Configuration
 # Add to your .env file:
 # TELEGRAM_BOT_TOKEN=your_token_here
 # ORBIT_UPLINK_USERS=your_telegram_id
 
-# 4. Run the uplink daemon
-python -m orbit_agent.uplink.main
+# 3. Run onboarding (writes .env + orbit_config.yaml)
+orbit onboard
+# Optional: install autostart (Windows Scheduled Task)
+# orbit onboard --install-daemon
+
+# 4. Run the Gateway (owns channels + health/status)
+orbit gateway
+
+# 5. (Legacy) Run Telegram-only uplink
+# orbit uplink
 ```
 
 Then message your bot on Telegram:
@@ -156,7 +183,7 @@ model:
 
 -   **High Efficiency:** Orbit uses a "Planning" architecture. It pays for thinking once, then executes 10-20 steps (coding, file ops) for free using local Python code.
 -   **Heavy Usage:** **Vision** features (Screen Analysis) send screenshots to GPT-5.1. This is token-heavy.
-    -   *Recommendation:* Use the CLI/Chat for coding tasks. Use the GUI Vision features for specific, high-value visual problems until we release **Local Vision** support.
+    -   *Recommendation:* Use the CLI/Chat for coding tasks. For visual debugging, use Telegram Uplink (`/screenshot`) or let the agent capture screenshots when needed.
 
 ---
 
@@ -166,7 +193,7 @@ model:
 
 -   **Core:** `orbit_agent.core` (Agent Loop, Planner, Router)
 -   **Skills:** `orbit_agent.skills` (Vision, Desktop, Browser, file I/O)
--   **GUI:** `orbit_agent.gui` (PyQt6 Asynchronous)
+ 
 -   **Memory:** Ephemeral (RAM) + Persistent Routines (`jsonl`).
 -   **Run traces (debugging):** `memory/runs/<task_id>.jsonl` (planning + step execution events).
 

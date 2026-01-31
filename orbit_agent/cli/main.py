@@ -69,6 +69,34 @@ def chat():
     asyncio.run(_chat_loop())
 
 @app.command()
+def onboard(install_daemon: bool = typer.Option(False, "--install-daemon", help="Install Uplink autostart (Windows Scheduled Task).")):
+    """
+    Interactive setup: provider/model + keys + (optional) Telegram.
+    Writes/updates .env and orbit_config.yaml in the current directory.
+    """
+    from orbit_agent.cli.onboard import run_onboarding
+
+    run_onboarding(install_daemon=install_daemon)
+
+@app.command()
+def uplink():
+    """
+    Start Orbit Uplink (Telegram bot).
+    """
+    from orbit_agent.uplink.main import main as uplink_main
+
+    uplink_main()
+
+@app.command()
+def gateway():
+    """
+    Start Orbit Gateway (recommended always-on daemon).
+    """
+    from orbit_agent.gateway.main import main as gateway_main
+
+    gateway_main()
+
+@app.command()
 def daemon():
     """
     Start the agent as a daemon processes (polling).

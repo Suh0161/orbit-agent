@@ -76,6 +76,7 @@ class SkillRegistry:
         from orbit_agent.skills.web_browse import WebBrowseSkill
         from orbit_agent.skills.code_analysis import CodeAnalysisSkill
         from orbit_agent.skills.browser import BrowserSkill
+        from orbit_agent.skills.moltbook import MoltbookSkill
         from orbit_agent.skills.apps import AppControlSkill
         from orbit_agent.skills.edit import FileEditSkill
 
@@ -84,6 +85,7 @@ class SkillRegistry:
         self.register_skill(WebBrowseSkill())
         self.register_skill(CodeAnalysisSkill())
         self.register_skill(BrowserSkill())
+        self.register_skill(MoltbookSkill())
         self.register_skill(AppControlSkill())
         self.register_skill(FileEditSkill())
         
