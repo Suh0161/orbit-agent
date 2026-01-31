@@ -38,7 +38,7 @@ Unlike simple chatbots, Orbit has hands.
 
 **Prerequisites:** Python 3.11+
 
-### One-liner install (like OpenClaw)
+### One-liner install
 
 **Windows (PowerShell):**
 
